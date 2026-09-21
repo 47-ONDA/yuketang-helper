@@ -9,23 +9,30 @@ EXE="ykt-helper"
 APP="build/${APP_NAME}.app"
 TARGET_MACOS="13.0"
 
-echo "[1/5] 编译 SwiftUI 界面 ..."
+echo "[1/5] 编译 SwiftUI 界面 (Universal: x86_64 + arm64) ..."
 mkdir -p "build"
 
-if [ ! -x engine/chromedriver ]; then
-    echo "[驱动] 缺少 chromedriver，下载 153.0.8010.50 ..."
+# 按当前 CPU 架构准备 chromedriver: 缺失或架构不符时下载对应版本
+ARCH=$(uname -m)
+if [ "$ARCH" = "arm64" ]; then CD_VARIANT="mac-arm64"; else CD_VARIANT="mac-x64"; fi
+DRV_INFO=$(lipo -info engine/chromedriver 2>/dev/null || echo missing)
+if [ ! -x engine/chromedriver ] || ! echo "$DRV_INFO" | grep -q "$ARCH"; then
+    echo "[驱动] 下载 chromedriver 153.0.8010.50 (${CD_VARIANT}) ..."
     curl -sL --max-time 180 -o /tmp/ykt_chromedriver.zip \
-        "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.50/mac-x64/chromedriver-mac-x64.zip" || \
+        "https://storage.googleapis.com/chrome-for-testing-public/153.0.8010.50/${CD_VARIANT}/chromedriver-${CD_VARIANT}.zip" || \
     curl -sL --max-time 180 -o /tmp/ykt_chromedriver.zip \
-        "https://registry.npmmirror.com/-/binary/chrome-for-testing/153.0.8010.50/mac-x64/chromedriver-mac-x64.zip"
-    unzip -o -q /tmp/ykt_chromedriver.zip -d /tmp/ykt_cdt
-    cp /tmp/ykt_cdt/chromedriver-mac-x64/chromedriver engine/chromedriver
+        "https://registry.npmmirror.com/-/binary/chrome-for-testing/153.0.8010.50/${CD_VARIANT}/chromedriver-${CD_VARIANT}.zip"
+    rm -rf /tmp/ykt_cdt && unzip -o -q /tmp/ykt_chromedriver.zip -d /tmp/ykt_cdt
+    cp "/tmp/ykt_cdt/chromedriver-${CD_VARIANT}/chromedriver" engine/chromedriver
     chmod +x engine/chromedriver
     xattr -d com.apple.quarantine engine/chromedriver 2>/dev/null || true
 fi
 
 swiftc -parse-as-library -O -target "x86_64-apple-macos${TARGET_MACOS}" \
-    -o "build/${EXE}" swift/App.swift
+    -o "build/${EXE}-x64" swift/App.swift
+swiftc -parse-as-library -O -target "arm64-apple-macos${TARGET_MACOS}" \
+    -o "build/${EXE}-arm64" swift/App.swift
+lipo -create -output "build/${EXE}" "build/${EXE}-x64" "build/${EXE}-arm64"
 
 echo "[2/5] 组装 .app 包 ..."
 rm -rf "$APP"

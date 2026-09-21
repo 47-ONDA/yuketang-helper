@@ -2,9 +2,7 @@
 
 长江雨课堂 / 标准版雨课堂的随堂课桌面助手：自动答题、课件扫描、按章节导出 PDF。
 
-![icon](assets/logo.jpg)
-
-原生 macOS 应用（SwiftUI 界面 + Python 引擎），支持微信扫码登录、随堂测验自动作答、课件逐页识别、课后按章节合并导出。
+原生 macOS 应用（SwiftUI 界面 + Python 引擎)，支持微信扫码登录、随堂测验自动作答、课件逐页识别、课后按章节合并导出。
 
 ## 致谢与许可
 
@@ -23,7 +21,7 @@
 
 | 依赖 | 说明 |
 |---|---|
-| macOS 13+ | 在 macOS 14 (x86_64) 开发测试 |
+| macOS 13+ | Intel 与 Apple Silicon 均原生支持（构建产物为双架构 Universal） |
 | Google Chrome | 引擎驱动的浏览器 |
 | Python 3 | 系统自带 `/usr/bin/python3` 即可，首次运行自动创建虚拟环境 |
 | Xcode Command Line Tools | 编译 Swift 界面（`swiftc`） |
