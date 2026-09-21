@@ -556,24 +556,37 @@ return (function() {
     out.sid = cs ? (cs.sid || cs.slideID || cs.id || null) : null;
     out.page = cs ? (cs.page || cs.index || cs.pageNum || cs.num || null) : null;
     out.presId = store ? (store.presentationId || (store.presentation && store.presentation.id) || null) : null;
-    // 大屏中央区域的原图候选: img 元素 src 与 CSS 背景图
+    // 图片候选按渲染面积排序: store 的当前页地址 > DOM 中最大的可见 img/背景图
+    const cands = [];
+    const seen = new Set();
+    const push = (url, area) => {
+        if (!/^https?:/.test(url) || area < 40000 || seen.has(url)) return;
+        seen.add(url);
+        cands.push({ url: url, area: area });
+    };
+    if (cs) {
+        for (const k of ['url', 'imgUrl', 'imageUrl', 'pageUrl', 'pic']) {
+            if (typeof cs[k] === 'string' && /^https?:/.test(cs[k])) push(cs[k], 9000000);
+        }
+    }
     const center = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
-    const urls = [];
     if (center) {
         for (const img of center.querySelectorAll('img')) {
-            const s = img.currentSrc || img.src;
-            if (s && /^https?:/.test(s) && img.offsetWidth > 200) urls.push(s);
+            const u = img.currentSrc || img.src;
+            if (u) push(u, img.offsetWidth * img.offsetHeight);
         }
         const els = [center].concat(Array.from(center.querySelectorAll('div')).slice(0, 300));
         for (const el of els) {
             try {
                 const bg = getComputedStyle(el).backgroundImage;
                 const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
-                if (m && /^https?:/.test(m[1])) urls.push(m[1]);
+                if (m) push(m[1], el.offsetWidth * el.offsetHeight);
             } catch(e) {}
         }
     }
-    out.imgUrls = Array.from(new Set(urls));
+    cands.sort((a, b) => b.area - a.area);
+    out.candidates = cands.map(c => c.url);
+    out.imgUrls = out.candidates;
     return out;
 })();
 """
@@ -594,6 +607,8 @@ class SlideSession:
         self.pages = []          # [{index,page,file,ocr,pres_switch}]
         self.captured_sids = set()
         self.last_pres_id = None
+        self.last_img_url = None
+        self.last_content_hash = None
         self.index = 0
 
     def bind_course(self, course_name):
@@ -846,20 +861,52 @@ def run_listen(scan_default=False):
         s.last_pres_id = info.get("presId") or s.last_pres_id
         s.captured_sids.add(sid)
 
+        # 等页面渲染稳定后重新取候选, 防止拿到上一页的 src/画面
+        time.sleep(1.2)
+        try:
+            info = driver.execute_script(SLIDE_INFO_JS) or info
+        except Exception:
+            pass
+
         referer = driver.current_url
         data = ext = None
-        for url in (info.get("imgUrls") or [])[:3]:
-            data, ext = download_image(driver, url, referer)
-            if data:
-                emit_log(f"第 {s.index + 1} 张: 原图下载")
+        via = url_used = None
+        for url in (info.get("candidates") or [])[:3]:
+            if url == s.last_img_url:
+                continue   # 上一张用过的地址不重复抓
+            d2, e2 = download_image(driver, url, referer)
+            if d2:
+                data, ext, via, url_used = d2, e2, "原图下载", url
                 break
-        if not data:
-            emit_log(f"第 {s.index + 1} 张: 未取到原图，使用页面截图")
-            path, fname = s.save_screenshot_slide(driver, page=info.get("page"),
-                                                  pres_switch=pres_switch)
-        else:
-            path, fname = s.save_slide(data, ext, page=info.get("page"),
-                                       pres_switch=pres_switch)
+        if data is None:
+            shot = None
+            try:
+                tmp = os.path.join(s.dir, ".tmp_shot.png")
+                driver.save_screenshot(tmp)
+                with open(tmp, "rb") as f:
+                    shot = f.read()
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            if shot is None:
+                emit_log(f"第 {s.index + 1} 张: 截图失败，跳过")
+                return
+            data, ext, via = shot, "png", "页面截图"
+
+        import hashlib
+        h = hashlib.sha1(data).hexdigest()
+        if h == s.last_content_hash:
+            emit_log(f"第 {s.index + 1} 张: 画面与上一张相同，跳过")
+            return
+        s.last_content_hash = h
+        if url_used:
+            s.last_img_url = url_used
+        emit_log(f"第 {s.index + 1} 张: {via}")
+        path, fname = s.save_slide(data, ext, page=info.get("page"),
+                                   pres_switch=pres_switch)
 
         text, ok = ocr_image(cfg, path)
         if s.pages:
