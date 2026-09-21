@@ -1,0 +1,6 @@
+build/
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+engine/chromedriver
