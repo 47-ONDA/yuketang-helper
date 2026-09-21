@@ -749,13 +749,13 @@ def stdin_command_loop(handlers):
                         fn(cmd)
                     except Exception:
                         pass
-        except Exception:
-            pass
+        except BaseException:
+            pass   # 退出信号到达时静默结束读取线程
     t = threading.Thread(target=loop, daemon=True)
     t.start()
 
 
-def run_listen():
+def run_listen(scan_default=False):
     def _sigterm(signum, frame):
         raise KeyboardInterrupt()
     try:
@@ -771,6 +771,10 @@ def run_listen():
 
     try:
         driver = get_driver(cfg, headless=False)
+    except KeyboardInterrupt:
+        emit({"event": "status", "listening": False})
+        emit_log("已停止")
+        return
     except Exception as e:
         emit({"event": "status", "listening": False})
         emit({"event": "error", "msg": str(e)})
@@ -791,6 +795,10 @@ def run_listen():
     })
 
     emit({"event": "status", "listening": True})
+    if scan_default:
+        scan_on["on"] = True
+        emit({"event": "scan_state", "on": True})
+        emit_log("课件扫描已开启 (--scan)")
     prevent_system_sleep()
     answered = set()
 
@@ -1209,12 +1217,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["scan", "listen", "merge", "cache-list"])
     ap.add_argument("--dir", default=None, help="merge 模式的会话目录")
+    ap.add_argument("--scan", action="store_true", help="listen 模式启动即开启课件扫描")
     args = ap.parse_args()
 
     if args.mode == "scan":
         run_scan()
     elif args.mode == "listen":
-        run_listen()
+        run_listen(scan_default=args.scan)
     elif args.mode == "merge":
         if not args.dir:
             emit_log("merge 需要 --dir 参数")

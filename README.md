@@ -50,6 +50,52 @@ cd <项目目录>
 
 > chromedriver 与 Chrome 大版本需一致，默认下载 153.0.8010.50。Chrome 升级大版本后，从 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) 下载对应版本覆盖 `engine/chromedriver` 后重新构建。
 
+## 源码直接运行（不构建 App）
+
+不装界面，直接跑引擎，功能完整（答题监听 / 课件扫描 / 导出），过程看终端日志：
+
+```bash
+# 1) 准备环境（一次性）
+python3 -m venv ~/.yuketang-helper/venv
+~/.yuketang-helper/venv/bin/pip install -r engine/requirements.txt
+
+# 2) 写配置（一次性），字段说明见下方「配置」一节
+mkdir -p ~/.yuketang-helper
+cat > ~/.yuketang-helper/config.json <<'EOF'
+{
+  "yuketang_base_url": "https://changjiang.yuketang.cn",
+  "browser": "chrome",
+  "api_base": "填写模型 API 地址",
+  "api_key": "填写 Key",
+  "models": ["填写模型名"],
+  "enable_multimodal": true,
+  "multimodal_models": ["填写视觉模型名"],
+  "ocr_primary": {"api_base": "填写课件识别接口", "api_key": "填写 Key", "model": "填写模型名"},
+  "ocr_backup": {"api_base": "", "api_key": "", "model": ""},
+  "auto_submit": true
+}
+EOF
+
+# 3) 扫码登录（一次性，登录态保存在本地）
+~/.yuketang-helper/venv/bin/python engine/engine.py scan
+
+# 4) 监听答题，Ctrl-C 退出；加 --scan 则同时开启课件扫描
+~/.yuketang-helper/venv/bin/python engine/engine.py listen
+~/.yuketang-helper/venv/bin/python engine/engine.py listen --scan
+
+# 5) 课后导出课件（按章合并 PDF/文本，成功后清缓存）
+~/.yuketang-helper/venv/bin/python engine/engine.py merge --dir ~/.yuketang-helper/课件缓存/<日期-课程名>
+
+# 查看待导出的课件会话
+~/.yuketang-helper/venv/bin/python engine/engine.py cache-list
+```
+
+说明：
+
+- **chromedriver**：引擎优先使用 `engine/chromedriver`（存在时），其次读环境变量 `YKT_DRIVER`，都没有则由 Selenium Manager 在线解析（部分网络下可能很慢，建议手动下载放到 `engine/` 目录）。版本需与本机 Chrome 大版本一致
+- 监听过程中也可以直接在终端输入 `{"cmd":"scan_on"}` 或 `{"cmd":"scan_off"}` 回车，实时开关课件扫描
+- 运行数据（配置、登录态、课件缓存、虚拟环境）统一在 `~/.yuketang-helper/`，与源码目录无关
+
 ## 使用
 
 1. 打开「雨课堂助手」→ **扫码登录**（微信扫码）
