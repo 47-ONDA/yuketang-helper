@@ -32,7 +32,6 @@ import time
 import re
 import glob
 import signal
-import shutil
 import argparse
 import threading
 import subprocess
@@ -49,6 +48,7 @@ PROFILE_DIR = os.path.join(RUNTIME_DIR, "ykt_profile")
 STATE_PATH = os.path.join(RUNTIME_DIR, "state.json")
 QUIZ_SHOT = os.path.join(RUNTIME_DIR, "current_problem.png")
 SLIDE_CACHE_ROOT = os.path.join(RUNTIME_DIR, "课件缓存")
+ENGINE_LOG_PATH = os.path.join(RUNTIME_DIR, "engine.log")
 
 BROWSER_APPS = [
     ("chrome", "/Applications/Google Chrome.app"),
@@ -76,6 +76,15 @@ def emit(obj):
 
 
 def emit_log(msg):
+    # 同步落盘一份, 排障不再依赖界面截图
+    try:
+        if os.path.exists(ENGINE_LOG_PATH) and os.path.getsize(ENGINE_LOG_PATH) > 1024 * 1024:
+            os.replace(ENGINE_LOG_PATH, ENGINE_LOG_PATH + ".1")
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        with open(ENGINE_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
     emit({"event": "log", "msg": msg})
 
 
@@ -487,61 +496,79 @@ const app = document.querySelector('#app');
 const store = app && app.__vue__ && app.__vue__.$store ? app.__vue__.$store.state : null;
 const currSlide = store ? store.currSlide : null;
 
+const vis = el => !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0));
+
+// 有未完成的题时跳到该时间点(与原版行为一致)
 const unfin = Array.from(document.querySelectorAll('.timeline__item.J_slide, .timeline__item'))
     .find(el => el.innerText.includes('未完成'));
 if (unfin && !unfin.className.includes('active')) {
     unfin.click();
 }
 
-const bodyText = document.body.innerText || '';
-const isCompleted = bodyText.includes('已完成') && !bodyText.includes('未完成');
-const hasTiming = Array.from(document.querySelectorAll('*')).some(el =>
-    (el.className && typeof el.className === 'string' && el.className.includes('timing')) ||
-    el.textContent.includes('倒计时')
-);
-const hasSubmit = Array.from(document.querySelectorAll('*')).some(el =>
-    (el.className && typeof el.className === 'string' && el.className.includes('submit-btn')) ||
-    el.textContent.includes('提交答案')
-);
-const centerCanvas = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
-const centerText = centerCanvas ? centerCanvas.innerText : '';
+// ---- 证据收集 ----
+// 1) 选项控件: 题目面板里可点击的选项容器(class 含 option/choice 等), 不收正文里的裸字母文本
+const optWidgets = Array.from(document.querySelectorAll(
+    '[class*="option"], [class*="choice"], [class*="answer-item"]'
+)).filter(el => vis(el) && typeof el.className === 'string'
+    && !/page|nav|slide|thumb|tab|menu|filter|sort/i.test(el.className));
 
-const hasZuoda = centerCanvas && Array.from(centerCanvas.querySelectorAll('*')).some(el =>
-    el.children.length === 0 && el.textContent.trim() === '作答' && el.offsetWidth > 0
-);
+// 2) 提交按钮: 文本恰为 提交答案/提交 的可见元素
+const btnEls = Array.from(document.querySelectorAll('button, [class*="submit"], [class*="btn"], a, span, div'));
+const submitBtn = btnEls.find(el => vis(el) && ['提交答案', '提交'].includes(el.textContent.trim()));
 
-if ((hasTiming || hasSubmit || hasZuoda) && !isCompleted) {
+// 3) 倒计时: 可见叶子元素的文本含 倒计时
+const timingText = btnEls.find(el => vis(el) && el.children.length === 0 && el.textContent.includes('倒计时'));
+
+// ---- 触发判定: 单一弱特征不再触发 ----
+const probType = currSlide ? Number(currSlide.problemType || 0) : 0;
+let trigger = null;
+if (probType >= 1 && probType <= 5) {
+    trigger = 'problemType=' + probType;          // 题目页专有字段, 普通课件页没有
+} else if (optWidgets.length >= 2 && (submitBtn || timingText)) {
+    trigger = 'DOM:选项控件x' + optWidgets.length + (submitBtn ? '+提交按钮' : '+倒计时');
+}
+
+if (trigger) {
     info.hasQuiz = true;
+    info.evidence = trigger;
     info.probId = currSlide ? (currSlide.problemID || currSlide.sid || currSlide.slideID) : null;
+    const centerCanvas = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
+    const centerText = centerCanvas ? centerCanvas.innerText : (document.body.innerText || '');
     info.domText = (currSlide ? (currSlide.body || currSlide.title || '') : '') || centerText.slice(0, 300);
 
-    const centerOpts = [];
-    if (centerCanvas) {
-        const pList = Array.from(centerCanvas.querySelectorAll('p, span, div, li'));
-        for (const p of pList) {
+    // 选项字母: 优先取选项控件自身的字母标记(A / A. / A、/ A+空格), 控件没有再找面板内裸字母
+    let letters = [];
+    for (const w of optWidgets) {
+        const t = (w.textContent || '').trim();
+        const m = t.match(/^([A-F])(?:[.、．]\\s]|\\s|$)/);
+        if (m) letters.push(m[1]);
+    }
+    if (letters.length < 2 && centerCanvas) {
+        for (const p of centerCanvas.querySelectorAll('p, span, div, li')) {
             const t = p.textContent.trim();
             if (['A', 'B', 'C', 'D', 'E', 'F'].includes(t) && p.children.length === 0 && p.offsetWidth > 0) {
-                centerOpts.push(t);
+                letters.push(t);
             }
         }
     }
-    const uniqueOpts = Array.from(new Set(centerOpts));
+    const uniqueOpts = Array.from(new Set(letters));
     const hasChoiceOptions = uniqueOpts.length >= 2;
 
-    let qType = '单选题';
-    const probType = currSlide ? currSlide.problemType : null;
-    if (hasChoiceOptions) {
-        if (probType === 2 || centerText.includes('多选')) qType = '多选题';
-        else qType = '单选题';
-    } else {
-        if (probType === 5 || centerText.includes('主观') || centerText.includes('简答') || (hasZuoda && !centerText.includes('填空'))) qType = '主观题';
-        else if (probType === 3 || probType === 4 || centerText.includes('填空') || (hasZuoda && centerText.includes('填空'))) qType = '填空题';
-        else if (probType === 2 || centerText.includes('多选')) qType = '多选题';
-        else if (probType === 1 || centerText.includes('单选')) qType = '单选题';
-        else qType = hasZuoda ? '主观题' : '单选题';
+    let qType = null;
+    if (probType === 1) qType = '单选题';
+    else if (probType === 2) qType = '多选题';
+    else if (probType === 3 || probType === 4) qType = '填空题';
+    else if (probType === 5) qType = '主观题';
+    if (!qType) {
+        if (hasChoiceOptions) {
+            if (centerText.includes('多选')) qType = '多选题';
+            else qType = '单选题';
+        } else if (centerText.includes('填空')) qType = '填空题';
+        else if (centerText.includes('主观') || centerText.includes('简答')) qType = '主观题';
+        else qType = '单选题';   // 已确认是题目, 分类不明时按单选处理
     }
     info.qType = qType;
-    if (qType.includes('选')) info.options = uniqueOpts.length > 0 ? uniqueOpts : ['A','B','C','D'];
+    if (qType.includes('选')) info.options = uniqueOpts.length > 0 ? uniqueOpts : ['A', 'B', 'C', 'D'];
     else info.options = null;
 }
 return info;
@@ -556,36 +583,75 @@ return (function() {
     out.sid = cs ? (cs.sid || cs.slideID || cs.id || null) : null;
     out.page = cs ? (cs.page || cs.index || cs.pageNum || cs.num || null) : null;
     out.presId = store ? (store.presentationId || (store.presentation && store.presentation.id) || null) : null;
-    // 图片候选按渲染面积排序: store 的当前页地址 > DOM 中最大的可见 img/背景图
+
+    // 搜索范围含 iframe (课件可能渲染在 iframe 里)
+    const roots = [document];
+    try {
+        for (const f of document.querySelectorAll('iframe')) {
+            try { if (f.contentDocument) roots.push(f.contentDocument); } catch(e) {}
+        }
+    } catch(e) {}
+
+    // 图片最近一次加载完成的时间戳: 翻页新加载的图最新, 静态封面最老
+    const rtime = {};
+    try {
+        const collect = (perf) => {
+            for (const r of perf.getEntriesByType('resource')) {
+                if (/\\.(png|jpe?g|webp)(\\?|$)/i.test(r.name)) {
+                    const t = r.responseEnd || r.startTime || 0;
+                    if (!(r.name in rtime) || t > rtime[r.name]) rtime[r.name] = t;
+                }
+            }
+        };
+        collect(performance);
+        for (const f of document.querySelectorAll('iframe')) {
+            try { if (f.contentWindow && f.contentWindow.performance) collect(f.contentWindow.performance); } catch(e) {}
+        }
+    } catch(e) {}
+
     const cands = [];
     const seen = new Set();
     const push = (url, area) => {
         if (!/^https?:/.test(url) || area < 40000 || seen.has(url)) return;
         seen.add(url);
-        cands.push({ url: url, area: area });
+        cands.push({ url: url, area: area, t: (url in rtime) ? rtime[url] : -1 });
     };
+
+    for (const root of roots) {
+        const center = root.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
+        const scopes = center ? [center, root] : [root];
+        for (const scope of scopes) {
+            for (const img of scope.querySelectorAll('img')) {
+                const u = img.currentSrc || img.src;
+                if (u) push(u, img.offsetWidth * img.offsetHeight);
+            }
+            const els = [scope].concat(Array.from(scope.querySelectorAll('div')).slice(0, 400));
+            for (const el of els) {
+                try {
+                    const bg = getComputedStyle(el).backgroundImage;
+                    const m = bg && bg.match(/url\\(["']?(.*?)["']?\\)/);
+                    if (m) push(m[1], el.offsetWidth * el.offsetHeight);
+                } catch(e) {}
+            }
+        }
+    }
+
+    // 排序: 加载时间新者优先(翻页刚加载的图排最前); 没有时间戳的按面积; 时间戳全是 -1 时退化为纯面积
+    const anyTimed = cands.some(c => c.t >= 0);
+    cands.sort((a, b) => anyTimed ? ((b.t < 0) - (a.t < 0)) || (b.t - a.t) || (b.area - a.area)
+                                  : b.area - a.area);
+
+    // store 的 url/pic 字段可能是不随翻页变化的封面, 只在 DOM 没有时垫底补入
+    const storeUrls = [];
     if (cs) {
         for (const k of ['url', 'imgUrl', 'imageUrl', 'pageUrl', 'pic']) {
-            if (typeof cs[k] === 'string' && /^https?:/.test(cs[k])) push(cs[k], 9000000);
+            if (typeof cs[k] === 'string' && /^https?:/.test(cs[k]) && !seen.has(cs[k])) {
+                seen.add(cs[k]);
+                storeUrls.push(cs[k]);
+            }
         }
     }
-    const center = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
-    if (center) {
-        for (const img of center.querySelectorAll('img')) {
-            const u = img.currentSrc || img.src;
-            if (u) push(u, img.offsetWidth * img.offsetHeight);
-        }
-        const els = [center].concat(Array.from(center.querySelectorAll('div')).slice(0, 300));
-        for (const el of els) {
-            try {
-                const bg = getComputedStyle(el).backgroundImage;
-                const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
-                if (m) push(m[1], el.offsetWidth * el.offsetHeight);
-            } catch(e) {}
-        }
-    }
-    cands.sort((a, b) => b.area - a.area);
-    out.candidates = cands.map(c => c.url);
+    out.candidates = cands.map(c => c.url).concat(storeUrls);
     out.imgUrls = out.candidates;
     return out;
 })();
@@ -619,11 +685,15 @@ class SlideSession:
             self.emit_session()
 
     def emit_session(self):
+        n = 0
+        if self.dir:
+            n = len([p for p in self.pages if os.path.exists(os.path.join(self.dir, p["file"]))])
         emit({"event": "session", "dir": self.dir, "course": self.course,
-              "date": self.date, "count": len(self.pages)})
+              "date": self.date, "count": n})
 
     def save_slide(self, data_bytes, ext="png", page=None, pres_switch=False):
         """保存一张课件图片(优先原图字节), 返回文件名"""
+        os.makedirs(self.dir, exist_ok=True)   # 导出清理后目录可能被删, 兜底重建
         self.index += 1
         fname = f"{self.date}-{self.course}-第{self.index:02d}张.{ext}"
         path = os.path.join(self.dir, fname)
@@ -639,6 +709,7 @@ class SlideSession:
         return path, fname
 
     def save_screenshot_slide(self, driver, page=None, pres_switch=False):
+        os.makedirs(self.dir, exist_ok=True)
         tmp = os.path.join(self.dir, ".tmp_shot.png")
         driver.save_screenshot(tmp)
         with open(tmp, "rb") as f:
@@ -651,6 +722,7 @@ class SlideSession:
 
     def flush_meta(self):
         if self.dir:
+            os.makedirs(self.dir, exist_ok=True)
             with open(os.path.join(self.dir, "slides.json"), "w", encoding="utf-8") as f:
                 json.dump({"date": self.date, "course": self.course, "pages": self.pages},
                           f, ensure_ascii=False, indent=1)
@@ -841,21 +913,26 @@ def run_listen(scan_default=False):
     answered = set()
 
     def handle_slide():
-        """课件翻页检测与抓取, 在监听线程内同步执行"""
+        """课件翻页检测与抓取, 在监听线程内同步执行; 任何异常只记日志不冒泡"""
         if not scan_on["on"]:
             return
+        s = session["s"]
+        seq = (s.index + 1) if s else 0
         try:
-            info = driver.execute_script(SLIDE_INFO_JS)
-        except Exception:
-            return
+            _capture_slide()
+        except Exception as e:
+            emit_log(f"第 {seq or '?'} 张: 扫描失败已跳过 ({str(e)[:80]})")
+
+    def _capture_slide():
+        info = driver.execute_script(SLIDE_INFO_JS)
         if not info or not info.get("sid"):
             return
         sid = info["sid"]
         s = session["s"]
-        if s and sid in s.captured_sids:
-            return
         if s is None:
             return  # 还没进课堂, 无课程名
+        if s and sid in s.captured_sids:
+            return
         pres_switch = (s.last_pres_id is not None and info.get("presId")
                        and info.get("presId") != s.last_pres_id)
         s.last_pres_id = info.get("presId") or s.last_pres_id
@@ -868,39 +945,46 @@ def run_listen(scan_default=False):
         except Exception:
             pass
 
-        referer = driver.current_url
-        data = ext = None
-        via = url_used = None
-        for url in (info.get("candidates") or [])[:3]:
-            if url == s.last_img_url:
-                continue   # 上一张用过的地址不重复抓
-            d2, e2 = download_image(driver, url, referer)
-            if d2:
-                data, ext, via, url_used = d2, e2, "原图下载", url
-                break
-        if data is None:
-            shot = None
+        import hashlib
+
+        def _shot_bytes():
             try:
+                os.makedirs(s.dir, exist_ok=True)
                 tmp = os.path.join(s.dir, ".tmp_shot.png")
                 driver.save_screenshot(tmp)
                 with open(tmp, "rb") as f:
-                    shot = f.read()
+                    data = f.read()
                 try:
                     os.remove(tmp)
                 except Exception:
                     pass
+                return data
             except Exception:
-                pass
+                return None
+
+        referer = driver.current_url
+        last_h = s.last_content_hash
+        data = ext = via = url_used = None
+        # 候选已按加载时间新者优先排序; 内容与上一张相同的候选换下一个
+        for url in (info.get("candidates") or [])[:4]:
+            if url == s.last_img_url:
+                continue   # 上一张用过的地址不重复抓
+            d2, e2 = download_image(driver, url, referer)
+            if d2 and hashlib.sha1(d2).hexdigest() != last_h:
+                data, ext, via, url_used = d2, e2, "原图下载", url
+                break
+        if data is None:
+            # 原图全失败或全是旧画面 → 截图兜底, 所见即当前页
+            shot = _shot_bytes()
             if shot is None:
                 emit_log(f"第 {s.index + 1} 张: 截图失败，跳过")
                 return
+            if last_h and hashlib.sha1(shot).hexdigest() == last_h:
+                emit_log(f"第 {s.index + 1} 张: 画面与上一张相同，跳过")
+                return
             data, ext, via = shot, "png", "页面截图"
 
-        import hashlib
         h = hashlib.sha1(data).hexdigest()
-        if h == s.last_content_hash:
-            emit_log(f"第 {s.index + 1} 张: 画面与上一张相同，跳过")
-            return
         s.last_content_hash = h
         if url_used:
             s.last_img_url = url_used
@@ -1011,13 +1095,59 @@ def run_listen(scan_default=False):
         emit({"event": "status", "listening": False})
 
 
+SUBMIT_FIND_CLICK_JS = """
+const roots = [document];
+try {
+    for (const f of document.querySelectorAll('iframe')) {
+        try { if (f.contentDocument) roots.push(f.contentDocument); } catch(e) {}
+    }
+} catch(e) {}
+const vis = el => !!(el && el.offsetWidth > 0);
+for (const root of roots) {
+    const els = root.querySelectorAll('button, [class*="submit"], [class*="btn"], a, span, div');
+    for (const el of els) {
+        const t = el.textContent.trim();
+        if ((t === '提交答案' || t === '提交') && vis(el)) {
+            el.click();
+            if (el.parentElement) el.parentElement.click();
+            return { success: true, text: t };
+        }
+    }
+}
+const texts = [];
+for (const root of roots) {
+    for (const el of root.querySelectorAll('button, [class*="btn"], [class*="submit"], a')) {
+        const t = el.textContent.trim().replace(/\\s+/g, ' ');
+        if (t && t.length <= 12 && vis(el) && !texts.includes(t)) texts.push(t);
+    }
+}
+return { success: false, buttons: texts.slice(0, 20) };
+"""
+
+
+def find_and_click_submit(driver, timeout=5.0):
+    """轮询等提交按钮出现(部分课堂选中选项后才渲染), 返回 (是否成功, 按钮文字或可见按钮清单)"""
+    deadline = time.time() + timeout
+    last = {}
+    while time.time() < deadline:
+        try:
+            last = driver.execute_script(SUBMIT_FIND_CLICK_JS) or {}
+        except Exception:
+            last = {}
+        if last.get("success"):
+            return True, last.get("text")
+        time.sleep(1)
+    return False, (last or {}).get("buttons") or []
+
+
 def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
     q_type = quiz_info.get("qType", "单选题")
     options = quiz_info.get("options", ["A", "B", "C", "D"])
     dom_text = (quiz_info.get("domText") or "").strip()
+    evidence = quiz_info.get("evidence") or "DOM"
     t_stamp = ts()
 
-    emit_log(f"[{t_stamp}] 检测到题目（{q_type}）")
+    emit_log(f"[{t_stamp}] 检测到题目（{q_type}，触发依据: {evidence}）")
     try:
         driver.save_screenshot(QUIZ_SHOT)
         shot = QUIZ_SHOT
@@ -1037,12 +1167,20 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
             letters = [c for c in ans.upper() if 'A' <= c <= 'Z']
             driver.execute_script("""
                 const letters = arguments[0];
-                const allEls = Array.from(document.querySelectorAll('p, span, div, li'));
+                // 优先: 题目面板的选项控件, 以字母标记开头(A / A. / A、/ A+空格)
+                const widgets = Array.from(document.querySelectorAll(
+                    '[class*="option"], [class*="choice"], [class*="answer-item"]'
+                )).filter(el => el.offsetWidth > 0 && typeof el.className === 'string'
+                    && !/page|nav|slide|thumb|tab|menu/i.test(el.className));
                 for (const ch of letters) {
-                    let optEl = allEls.find(el => el.children.length === 0 && el.textContent.trim() === ch && el.offsetWidth > 0);
-                    if (optEl) {
-                        optEl.click();
-                        if (optEl.parentElement) optEl.parentElement.click();
+                    let hit = widgets.find(el => new RegExp('^' + ch + '([.、．\\\\s]|$)').test((el.textContent || '').trim()));
+                    if (!hit) {
+                        const allEls = Array.from(document.querySelectorAll('p, span, div, li'));
+                        hit = allEls.find(el => el.children.length === 0 && el.textContent.trim() === ch && el.offsetWidth > 0);
+                    }
+                    if (hit) {
+                        hit.click();
+                        if (hit.parentElement) hit.parentElement.click();
                     }
                 }
             """, letters)
@@ -1094,33 +1232,14 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
             time.sleep(1)
 
         if auto_submit:
-            if "填空" in q_type or "主观" in q_type:
-                sub_res = driver.execute_script("""
-                    const btnBoxes = Array.from(document.querySelectorAll('.btn-box, [class*="drawer"], .submission-btn'));
-                    for (const box of btnBoxes) {
-                        const btn = Array.from(box.querySelectorAll('button, span, div, a')).find(el =>
-                            ['提交答案', '提交'].includes(el.textContent.trim()) && el.offsetWidth > 0);
-                        if (btn) { btn.click(); if (btn.parentElement) btn.parentElement.click(); return {success:true,target:'drawer'}; }
-                    }
-                    const all = Array.from(document.querySelectorAll('*')).reverse();
-                    const sub = all.find(el => el.children.length === 0 && ['提交答案','提交'].includes(el.textContent.trim()) && el.offsetWidth > 0);
-                    if (sub) { sub.click(); if (sub.parentElement) sub.parentElement.click(); return {success:true,target:'reverse'}; }
-                    return {success:false};
-                """)
+            ok, extra = find_and_click_submit(driver, timeout=5.0)
+            if ok:
+                submit_desc = "已提交"
+                emit_log("已提交")
             else:
-                sub_res = driver.execute_script("""
-                    const allEls = Array.from(document.querySelectorAll('button, .submit-btn, div, span, a'));
-                    const sub = allEls.find(b => {
-                        const t = b.textContent.trim();
-                        const cls = b.className || '';
-                        return b.offsetWidth > 0 && (t === '提交答案' || t === '提交' ||
-                            (typeof cls === 'string' && cls.includes('submit-btn')));
-                    });
-                    if (sub) { sub.click(); if (sub.parentElement) sub.parentElement.click(); return {success:true,target:'canvas'}; }
-                    return {success:false};
-                """)
-            submit_desc = "已提交" if (sub_res and sub_res.get("success")) else "提交按钮未找到"
-            emit_log("已提交" if submit_desc == "已提交" else f"提交失败: 未找到提交按钮")
+                btns = "、".join((extra or [])[:12]) if extra else "无"
+                submit_desc = "未找到提交按钮"
+                emit_log(f"未找到提交按钮（部分题型选中即自动提交；页面可见按钮: {btns}）")
         else:
             emit_log("自动提交已关闭，答案已填入")
             submit_desc = "未自动提交"
@@ -1147,7 +1266,7 @@ def detect_chapters(cfg, pages):
     api_base = cfg.get("api_base", "").rstrip("/")
     api_key = cfg.get("api_key", "")
     model = (cfg.get("models") or [""])[0]
-    if not (api_base and api_key and model):
+    if not api_key or not api_base or not model:
         emit_log("模型 API 未配置，全部页面合并为一个文件")
         return None
 
@@ -1262,8 +1381,23 @@ def run_merge(session_dir):
         emit_log(f"合并失败: {str(e)[:100]}")
 
     if ok_all:
-        shutil.rmtree(session_dir, ignore_errors=True)
-        emit_log(f"缓存图片已清理，文件保存在 {out_dir}")
+        # 只清理已导出的图片, 保留目录与 slides.json —— 监听可能仍在写入
+        # (导出后继续扫描的新图落在同一目录, 下次导出按图片存在性只合并新页)
+        removed = 0
+        for p in pages:
+            try:
+                os.remove(os.path.join(session_dir, p["file"]))
+                removed += 1
+            except Exception:
+                pass
+        meta["pages"] = [p for p in meta.get("pages", [])
+                         if os.path.exists(os.path.join(session_dir, p["file"]))]
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+        emit_log(f"已导出的 {removed} 张缓存图片已清理，文件保存在 {out_dir}")
     emit({"event": "chapters", "items": items})
     emit({"event": "merge_done", "ok": ok_all, "out_dir": out_dir if ok_all else None})
 
