@@ -71,8 +71,13 @@ DEFAULT_CONFIG = {
 }
 
 
+_EMIT_LOCK = threading.Lock()
+
+
 def emit(obj):
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    # OCR 在后台线程运行, 日志行必须串行写出避免协议串行损坏
+    with _EMIT_LOCK:
+        print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
 def emit_log(msg):
@@ -676,6 +681,7 @@ class SlideSession:
         self.last_img_url = None
         self.last_content_hash = None
         self.index = 0
+        self.meta_lock = threading.Lock()   # OCR 后台线程与主线程都会写 slides.json
 
     def bind_course(self, course_name):
         if self.course is None and course_name:
@@ -722,10 +728,11 @@ class SlideSession:
 
     def flush_meta(self):
         if self.dir:
-            os.makedirs(self.dir, exist_ok=True)
-            with open(os.path.join(self.dir, "slides.json"), "w", encoding="utf-8") as f:
-                json.dump({"date": self.date, "course": self.course, "pages": self.pages},
-                          f, ensure_ascii=False, indent=1)
+            with self.meta_lock:
+                os.makedirs(self.dir, exist_ok=True)
+                with open(os.path.join(self.dir, "slides.json"), "w", encoding="utf-8") as f:
+                    json.dump({"date": self.date, "course": self.course, "pages": self.pages},
+                              f, ensure_ascii=False, indent=1)
 
 
 def download_image(driver, url, referer):
@@ -736,7 +743,7 @@ def download_image(driver, url, referer):
             s.cookies.set(c.get("name"), c.get("value"), domain=c.get("domain"))
         r = s.get(url, headers={"Referer": referer, "User-Agent":
                   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
-                  timeout=15)
+                  timeout=10)
         if r.status_code == 200 and len(r.content) > 5000:
             ct = (r.headers.get("Content-Type") or "").lower()
             ext = "jpg" if ("jpeg" in ct or "jpg" in ct) else "png"
@@ -938,12 +945,16 @@ def run_listen(scan_default=False):
         s.last_pres_id = info.get("presId") or s.last_pres_id
         s.captured_sids.add(sid)
 
-        # 等页面渲染稳定后重新取候选, 防止拿到上一页的 src/画面
-        time.sleep(1.2)
+        # 短暂等待渲染稳定后重取候选; 期间已翻页则作废本次, 下轮循环抓当前页
+        time.sleep(0.7)
         try:
-            info = driver.execute_script(SLIDE_INFO_JS) or info
+            info2 = driver.execute_script(SLIDE_INFO_JS)
         except Exception:
-            pass
+            info2 = None
+        if info2 and info2.get("sid") and info2["sid"] != sid:
+            s.captured_sids.discard(sid)
+            return
+        info = info2 or info
 
         import hashlib
 
@@ -992,17 +1003,30 @@ def run_listen(scan_default=False):
         path, fname = s.save_slide(data, ext, page=info.get("page"),
                                    pres_switch=pres_switch)
 
-        text, ok = ocr_image(cfg, path)
-        if s.pages:
-            s.pages[-1]["ocr"] = text
-        s.flush_meta()
-        head = text.replace("\n", " ")[:40] if text else ""
-        emit_log(f"第 {s.index} 张已保存" + (f"，识别 {len(text)} 字" if ok else "，识别失败"))
+        # 识别转后台: 主循环立刻返回继续盯翻页, 不让 OCR 拖慢抓取
+        page_entry = s.pages[-1] if s.pages else {"index": s.index, "page": s.index}
+
+        def ocr_worker():
+            try:
+                text, ok = ocr_image(cfg, path)
+            except Exception:
+                text, ok = "", False
+            page_entry["ocr"] = text
+            try:
+                s.flush_meta()
+            except Exception:
+                pass
+            head = text.replace("\n", " ")[:40] if text else ""
+            emit_log(f"第 {page_entry['index']} 张识别" + ("完成" if ok else "失败"))
+            emit({"event": "slide_ocr", "index": page_entry["index"], "file": fname,
+                  "ocr_head": head, "ocr_ok": ok})
+
+        threading.Thread(target=ocr_worker, daemon=True).start()
         if pres_switch:
             emit_log("检测到课件切换")
         emit({"event": "slide", "index": s.index,
-              "page": s.pages[-1]["page"] if s.pages else s.index,
-              "file": fname, "ocr_head": head, "ocr_ok": ok})
+              "page": page_entry.get("page", s.index),
+              "file": fname, "ocr_head": "", "ocr_ok": False})
         s.emit_session()
 
     try:
