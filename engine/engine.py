@@ -663,6 +663,20 @@ def download_image(driver, url, referer):
 # 模式一: 扫码登录
 # ---------------------------------------------------------------------------
 
+def force_logout(driver, base_url):
+    """清除当前域的 Cookie 与本地存储并重开首页, 回到扫码登录页"""
+    try:
+        driver.delete_all_cookies()
+    except Exception:
+        pass
+    try:
+        driver.execute_script("try{localStorage.clear();sessionStorage.clear();}catch(e){}")
+    except Exception:
+        pass
+    driver.get(f"{base_url}/v2/web/index")
+    time.sleep(2)
+
+
 def run_scan():
     cfg = load_config()
     base_url = cfg.get("yuketang_base_url", DEFAULT_CONFIG["yuketang_base_url"]).rstrip("/")
@@ -678,6 +692,15 @@ def run_scan():
     try:
         driver.get(f"{base_url}/v2/web/index")
         time.sleep(2)
+        # 已有登录态时先退出当前账号, 回到扫码页等待重新扫码(可换人)
+        try:
+            st = driver.execute_script(LOGIN_STATE_JS)
+            if st and st.get("logged"):
+                prev = st.get("name") or "未取到姓名"
+                emit_log(f"检测到已有登录态（{prev}），已退出当前账号，等待新扫码")
+                force_logout(driver, base_url)
+        except Exception:
+            pass
         for _ in range(200):
             time.sleep(1.5)
             try:
