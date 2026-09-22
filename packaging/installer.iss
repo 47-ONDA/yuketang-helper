@@ -8,7 +8,7 @@ AppVersion=1.1.0
 AppVerName=雨课堂助手 1.1.0
 DefaultDirName={autopf}\YuketangHelper
 DefaultGroupName=雨课堂助手
-OutputDir=dist\installer
+OutputDir=..\dist\installer
 OutputBaseFilename=yuketang-helper-1.1.0-windows-setup
 Compression=lzma2
 SolidCompression=yes
@@ -20,7 +20,7 @@ UninstallDisplayIcon={app}\ykt-helper-gui.exe
 Name: "chinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 
 [Files]
-Source: "dist\ykt-helper-gui\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\dist\ykt-helper-gui\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
 Name: "{group}\雨课堂助手"; Filename: "{app}\ykt-helper-gui.exe"

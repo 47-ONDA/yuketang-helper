@@ -49,20 +49,28 @@ $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
 if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
     Write-Host "  ChineseSimplified.isl 缺失, 尝试从官方仓库下载..."
     New-Item -ItemType Directory -Force -Path $langDir | Out-Null
-    try {
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl" `
-            -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
-    } catch {
-        Write-Host "  下载失败, 安装器界面退回英文"
-        (Get-Content "packaging\installer.iss") |
-            Where-Object { $_ -notmatch 'Languages|ChineseSimplified' } |
-            Set-Content "packaging\installer.no-zh.iss"
+    foreach ($u in @(
+        "https://raw.githubusercontent.com/jrsoftware/issrc/master/Files/Languages/Unofficial/ChineseSimplified.isl",
+        "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl")) {
+        try {
+            Invoke-WebRequest -Uri $u -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
+            break
+        } catch { Write-Host "  源失败: $u" }
     }
+}
+if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
+    Write-Host "  下载失败, 安装器界面退回英文"
+    (Get-Content "packaging\installer.iss") |
+        Where-Object { $_ -notmatch 'Languages|ChineseSimplified' } |
+        Set-Content "packaging\installer.no-zh.iss"
 }
 $issFile = if (Test-Path "packaging\installer.no-zh.iss") { "packaging\installer.no-zh.iss" } else { "packaging\installer.iss" }
 $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 if (Get-Command iscc -ErrorAction SilentlyContinue) { $isccPath = (Get-Command iscc).Source }
-Run-Step "ISCC $issFile" { & $isccPath $issFile }
+Write-Host ">>> ISCC $issFile"
+$isccOut = & $isccPath $issFile 2>&1
+$isccOut | ForEach-Object { Write-Host "  $_" }
+if ($LASTEXITCODE -ne 0) { throw "ISCC 失败 (exit $LASTEXITCODE)" }
 
 Stop-Transcript
 Write-Host "完成: dist\ykt-helper-gui\ 与 dist\installer\"
