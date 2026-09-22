@@ -1424,7 +1424,12 @@ def run_merge(session_dir):
         return
     with open(meta_path, encoding="utf-8") as f:
         meta = json.load(f)
-    pages = [p for p in meta.get("pages", []) if os.path.exists(os.path.join(session_dir, p["file"]))]
+    raw_pages = [p for p in meta.get("pages", []) if os.path.exists(os.path.join(session_dir, p["file"]))]
+    # 剔除动画提示页(雨课堂「当前页面有动画」覆盖层, 没有课件内容)
+    pages = [p for p in raw_pages if not is_animation_notice(p.get("ocr"))]
+    skipped = len(raw_pages) - len(pages)
+    if skipped:
+        emit_log(f"已剔除 {skipped} 张动画提示页")
     if not pages:
         emit_log("没有可用的课件图片")
         emit({"event": "merge_done", "ok": False, "out_dir": None})
