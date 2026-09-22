@@ -1,0 +1,40 @@
+name: windows-build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "engine/**"
+      - "gui/**"
+      - "packaging/**"
+      - ".github/workflows/windows-build.yml"
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装 Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: 构建 (chromedriver + PyInstaller + 安装包)
+        shell: pwsh
+        run: ./packaging/build-windows.ps1
+
+      - name: 上传绿色目录
+        uses: actions/upload-artifact@v4
+        with:
+          name: yuketang-helper-windows
+          path: dist/ykt-helper-gui/
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-setup
+          path: dist/installer/*.exe

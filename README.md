@@ -1,8 +1,8 @@
-# 雨课堂助手 (macOS)
+# 雨课堂助手
 
 长江雨课堂 / 标准版雨课堂的随堂课桌面助手：自动答题、课件扫描、按章节导出 PDF。
 
-原生 macOS 应用（SwiftUI 界面 + Python 引擎)，支持微信扫码登录、随堂测验自动作答、课件逐页识别、课后按章节合并导出。
+支持 **macOS**（SwiftUI 原生应用）与 **Windows**（单目录绿色版 / 安装包，tkinter 界面），两端共用同一套 Python 引擎：微信扫码登录、随堂测验自动作答、课件逐页识别、课后按章节合并导出。
 
 ## 致谢与许可
 
@@ -64,6 +64,19 @@ cd <项目目录>
 `build.sh` 会自动完成：下载 chromedriver（若缺失）→ 编译 SwiftUI 界面 → 组装 `.app` → 安装到 `/Applications`。
 
 > chromedriver 与 Chrome 大版本需一致，默认下载 153.0.8010.50。Chrome 升级大版本后，从 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) 下载对应版本覆盖 `engine/chromedriver` 后重新构建。
+
+## Windows 安装
+
+两种方式（功能相同，二选一）：
+
+1. **安装包**：到 [Releases](../../releases) 下载 `yuketang-helper-*-windows-setup.exe`，双击安装，开始菜单启动
+2. **绿色目录**：下载 `yuketang-helper-windows.zip`（Actions 构建产物），解压直接运行 `ykt-helper-gui.exe`
+
+- 无需安装 Python（已用 PyInstaller 打包）；需要 Windows 10/11 与 Chrome 或 Edge
+- 首次运行若被 SmartScreen 拦截：点「更多信息」→「仍要运行」（应用无付费签名）
+- 首次打开「设置」填入模型 API 与课件识别 Key 后使用，配置存于 `%USERPROFILE%\.yuketang-helper\`
+
+Windows 版由 GitHub Actions 在每次引擎代码变更时自动构建（见 `.github/workflows/windows-build.yml`），构建产物在 Actions 页面的 Artifacts 里。
 
 ## 源码直接运行（不构建 App）
 

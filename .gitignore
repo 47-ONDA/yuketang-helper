@@ -4,3 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 engine/chromedriver
+engine/chromedriver.exe
+dist/
+chromedriver.zip
+chromedriver_tmp/

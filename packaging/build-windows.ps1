@@ -1,0 +1,39 @@
+# 雨课堂助手 Windows 构建脚本 (GitHub Actions windows-latest 或本机 PowerShell 运行)
+# 产物: dist\ykt-helper-gui\ (绿色目录) + dist\installer\*-setup.exe (Inno Setup 安装包)
+$ErrorActionPreference = "Stop"
+$CD_VERSION = "153.0.8010.50"
+
+Write-Host "[1/5] 下载 chromedriver win64 $CD_VERSION ..."
+$ok = $false
+foreach ($url in @(
+    "https://storage.googleapis.com/chrome-for-testing-public/$CD_VERSION/win64/chromedriver-win64.zip",
+    "https://registry.npmmirror.com/-/binary/chrome-for-testing/$CD_VERSION/win64/chromedriver-win64.zip")) {
+    try {
+        Invoke-WebRequest -Uri $url -OutFile "chromedriver.zip" -TimeoutSec 180
+        $ok = $true; break
+    } catch { Write-Host "  源失败: $url" }
+}
+if (-not $ok) { throw "chromedriver 下载失败" }
+Expand-Archive chromedriver.zip -DestinationPath chromedriver_tmp -Force
+Copy-Item "chromedriver_tmp\chromedriver-win64\chromedriver.exe" "engine\chromedriver.exe" -Force
+
+Write-Host "[2/5] 安装依赖 ..."
+python -m pip install --upgrade pip
+pip install -r engine/requirements.txt
+pip install pyinstaller
+
+Write-Host "[3/5] PyInstaller 打包 ..."
+pyinstaller --noconfirm --clean --name engine --console --onefile `
+    --add-binary "engine/chromedriver.exe;." engine/engine.py
+pyinstaller --noconfirm --clean --name ykt-helper-gui --windowed gui/gui.py
+
+Write-Host "[4/5] 合并产物 ..."
+Copy-Item "dist\engine\engine.exe" "dist\ykt-helper-gui\engine.exe" -Force
+
+Write-Host "[5/5] Inno Setup 安装包 ..."
+$iscc = Get-Command iscc -ErrorAction SilentlyContinue
+if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
+& $iscc.ToString() "packaging\installer.iss"
+if ($LASTEXITCODE -ne 0) { throw "ISCC 失败" }
+
+Write-Host "完成: dist\ykt-helper-gui\ 与 dist\installer\"

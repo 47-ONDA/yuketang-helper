@@ -41,6 +41,17 @@ import requests
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchWindowException, WebDriverException
 
+if sys.platform.startswith("win"):
+    # Windows 控制台默认 GBK, 统一 UTF-8 输出避免协议乱码
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+IS_WINDOWS = os.name == "nt"
+IS_MAC = sys.platform == "darwin"
+
 ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(os.path.expanduser("~"), ".yuketang-helper")
 CONFIG_PATH = os.path.join(RUNTIME_DIR, "config.json")
@@ -50,10 +61,28 @@ QUIZ_SHOT = os.path.join(RUNTIME_DIR, "current_problem.png")
 SLIDE_CACHE_ROOT = os.path.join(RUNTIME_DIR, "课件缓存")
 ENGINE_LOG_PATH = os.path.join(RUNTIME_DIR, "engine.log")
 
-BROWSER_APPS = [
-    ("chrome", "/Applications/Google Chrome.app"),
-    ("edge", "/Applications/Microsoft Edge.app"),
-]
+
+def _default_browser_paths():
+    """各平台常见浏览器可执行文件路径, 顺序即探测优先级"""
+    if IS_MAC:
+        return [("chrome", "/Applications/Google Chrome.app"),
+                ("edge", "/Applications/Microsoft Edge.app")]
+    if IS_WINDOWS:
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        local = os.environ.get("LocalAppData", os.path.expanduser(r"~\AppData\Local"))
+        return [
+            ("chrome", os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe")),
+            ("chrome", os.path.join(pf86, "Google", "Chrome", "Application", "chrome.exe")),
+            ("chrome", os.path.join(local, "Google", "Chrome", "Application", "chrome.exe")),
+            ("edge", os.path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe")),
+            ("edge", os.path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe")),
+        ]
+    return [("chrome", "/usr/bin/google-chrome"), ("chrome", "/usr/bin/chromium-browser"),
+            ("edge", "/usr/bin/microsoft-edge")]
+
+
+BROWSER_APPS = _default_browser_paths()
 
 DEFAULT_CONFIG = {
     "yuketang_base_url": "https://changjiang.yuketang.cn",
@@ -120,47 +149,80 @@ def sanitize_filename(name, max_len=30):
 
 
 # ---------------------------------------------------------------------------
-# macOS 适配 / 浏览器
+# 跨平台: 防休眠 / 浏览器进程清理 / 浏览器探测
 # ---------------------------------------------------------------------------
 
 _caffeinate_proc = None
+_sleep_display_on = False
+
 
 def prevent_system_sleep():
-    global _caffeinate_proc
-    if sys.platform == "darwin" and _caffeinate_proc is None:
+    global _caffeinate_proc, _sleep_display_on
+    if IS_MAC:
+        if _caffeinate_proc is None:
+            try:
+                _caffeinate_proc = subprocess.Popen(
+                    ["caffeinate", "-dis"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+    elif IS_WINDOWS:
         try:
-            _caffeinate_proc = subprocess.Popen(
-                ["caffeinate", "-dis"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import ctypes
+            # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
+            _sleep_display_on = True
         except Exception:
             pass
 
 
 def restore_system_sleep():
-    global _caffeinate_proc
-    if _caffeinate_proc is not None:
+    global _caffeinate_proc, _sleep_display_on
+    if IS_MAC and _caffeinate_proc is not None:
         try:
             _caffeinate_proc.terminate()
         except Exception:
             pass
         _caffeinate_proc = None
+    elif IS_WINDOWS and _sleep_display_on:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)  # ES_CONTINUOUS
+            _sleep_display_on = False
+        except Exception:
+            pass
 
 
-def ensure_browser_clean():
+_KILL_PS_TEMPLATE = ("Get-CimInstance Win32_Process | "
+                     "Where-Object { $_.CommandLine -like '*PROFILE_PATTERN*' } | "
+                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+
+
+def kill_profile_browsers(force=False):
+    """按 user-data-dir 杀掉残留的浏览器进程 (跨平台)"""
+    pattern = f"--user-data-dir={PROFILE_DIR}"
     try:
-        subprocess.run(["pkill", "-f", f"--user-data-dir={PROFILE_DIR}"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if IS_WINDOWS:
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            _KILL_PS_TEMPLATE.replace("PROFILE_PATTERN", pattern)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            args = ["pkill", "-f", pattern]
+            if force:
+                args.insert(1, "-9")
+            subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.5)
     except Exception:
         pass
 
 
 def detect_browser(pref):
-    order = [n for n, _ in BROWSER_APPS]
-    if pref in ("chrome", "edge"):
+    order = ["chrome", "edge"]
+    if pref in order:
         order = [pref] + [n for n in order if n != pref]
     for name in order:
-        if os.path.exists(dict(BROWSER_APPS)[name]):
-            return name
+        for want, path in BROWSER_APPS:
+            if want == name and os.path.exists(path):
+                return name
     return None
 
 
@@ -168,7 +230,8 @@ def resolve_driver_path():
     p = os.environ.get("YKT_DRIVER")
     if p and os.path.exists(p):
         return p
-    p = os.path.join(ENGINE_DIR, "chromedriver")
+    name = "chromedriver.exe" if IS_WINDOWS else "chromedriver"
+    p = os.path.join(ENGINE_DIR, name)
     return p if os.path.exists(p) else None
 
 
@@ -176,15 +239,14 @@ def get_driver(cfg, headless=False):
     os.makedirs(PROFILE_DIR, exist_ok=True)
     last_err = None
     for attempt in range(1, 4):
-        ensure_browser_clean()
+        kill_profile_browsers(force=False)
         try:
             return _launch_browser(cfg, headless)
         except Exception as e:
             last_err = e
             emit_log(f"浏览器启动失败 (第 {attempt}/3 次)")
             try:
-                subprocess.run(["pkill", "-9", "-f", f"--user-data-dir={PROFILE_DIR}"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                kill_profile_browsers(force=True)
                 time.sleep(1)
                 for lock in glob.glob(os.path.join(PROFILE_DIR, "Singleton*")):
                     try:
@@ -864,6 +926,11 @@ def save_state(name):
 # 模式二: 监听 + 答题 + 课件扫描
 # ---------------------------------------------------------------------------
 
+SLIDE_SETTLE_WAIT = 0.7     # 翻页后等渲染稳定的时长(秒); 期间翻页则作废本次
+SLIDE_MAX_CANDIDATES = 4    # 原图候选最多尝试下载数
+SUBMIT_WAIT_SECONDS = 5.0   # 等提交按钮出现的时长(部分课堂选中后才渲染)
+
+
 def stdin_command_loop(handlers):
     """读 stdin 的 JSON 命令行, 分发给 handlers"""
     def loop():
@@ -886,6 +953,192 @@ def stdin_command_loop(handlers):
             pass   # 退出信号到达时静默结束读取线程
     t = threading.Thread(target=loop, daemon=True)
     t.start()
+
+
+class SlideCapture:
+    """监听中的课件扫描: 翻页检测、抓取保存、后台 OCR。由 run_listen 驱动。
+
+    协议事件: scan_state / slide / slide_ocr / slide_removed / session / log
+    """
+
+    def __init__(self, cfg, driver):
+        self.cfg = cfg
+        self.driver = driver
+        self.on = False
+        self.session = None   # 当前 SlideSession
+
+    def set_enabled(self, state, reason=""):
+        self.on = state
+        emit({"event": "scan_state", "on": state})
+        emit_log(("课件扫描已开启" + reason) if state else "课件扫描已关闭")
+
+    def bind_course(self, course_name):
+        """进入新课堂时换会话; 同一门课沿用(保留 captured_sids 与去重集合)"""
+        if self.session is None or self.session.course != sanitize_filename(course_name):
+            self.session = SlideSession(self.cfg)
+            self.session.bind_course(course_name)
+
+    def handle_slide(self):
+        """监听循环每轮调用; 任何异常只记日志, 不拖垮答题链路"""
+        if not self.on or self.session is None:
+            return
+        seq = self.session.index + 1
+        try:
+            self.capture_slide()
+        except Exception as e:
+            emit_log(f"第 {seq or '?'} 张: 扫描失败已跳过 ({str(e)[:80]})")
+
+    def capture_slide(self):
+        driver, s = self.driver, self.session
+        info = driver.execute_script(SLIDE_INFO_JS)
+        if not info or not info.get("sid"):
+            return
+        sid = info["sid"]
+        if sid in s.captured_sids:
+            return
+        if info.get("animated"):
+            return  # 动画提示层盖着, 内容没显示; 不标记 sid, 播完动画后下轮再抓
+        pres_switch = (s.last_pres_id is not None and info.get("presId")
+                       and info.get("presId") != s.last_pres_id)
+        if pres_switch:
+            s.seen_hashes.clear()   # 换课件后内容重新计
+        s.last_pres_id = info.get("presId") or s.last_pres_id
+        s.captured_sids.add(sid)
+
+        # 短暂等待渲染稳定后重取候选; 期间已翻页则作废本次, 下轮循环抓当前页
+        time.sleep(SLIDE_SETTLE_WAIT)
+        try:
+            info2 = driver.execute_script(SLIDE_INFO_JS)
+        except Exception:
+            info2 = None
+        if info2 and info2.get("sid") and info2["sid"] != sid:
+            s.captured_sids.discard(sid)
+            return
+        if info2 and info2.get("animated"):
+            return  # 等待期间出现动画层, 作废
+        info = info2 or info
+
+        data, ext, via, url_used = self._fetch_image(info, s)
+        if data is None:
+            return
+        content_hash = hashlib.sha1(data).hexdigest()
+        s.seen_hashes.add(content_hash)
+        if url_used:
+            s.last_img_url = url_used
+        emit_log(f"第 {s.index + 1} 张: {via}")
+        path, fname = s.save_slide(data, ext, page=info.get("page"),
+                                   pres_switch=pres_switch)
+        self._start_ocr(s, path, fname, content_hash)
+        if pres_switch:
+            emit_log("检测到课件切换")
+        page_entry = s.pages[-1] if s.pages else {"index": s.index, "page": s.index}
+        emit({"event": "slide", "index": s.index,
+              "page": page_entry.get("page", s.index),
+              "file": fname, "ocr_head": "", "ocr_ok": False})
+        s.emit_session()
+
+    def _fetch_image(self, info, s):
+        """按候选顺序下载原图; 全部失败/重复时转课件区域裁剪截图。
+        返回 (data, ext, via, url_used) 或 (None,)*4"""
+        referer = self.driver.current_url
+        for url in (info.get("candidates") or [])[:SLIDE_MAX_CANDIDATES]:
+            if url == s.last_img_url:
+                continue   # 上一张用过的地址不重复抓
+            d2, e2 = download_image(self.driver, url, referer)
+            if d2 and hashlib.sha1(d2).hexdigest() not in s.seen_hashes:
+                return d2, e2, "原图下载", url
+        shot = self._shot_bytes(s)
+        if shot is None:
+            emit_log(f"第 {s.index + 1} 张: 截图失败，跳过")
+            return None, None, None, None
+        if hashlib.sha1(shot).hexdigest() in s.seen_hashes:
+            emit_log(f"第 {s.index + 1} 张: 画面与已抓内容相同，跳过")
+            return None, None, None, None
+        return shot, "png", "页面截图", None
+
+    def _shot_bytes(self, s):
+        """页面截图, 裁到课件区域(去掉侧边栏/弹幕); 取不到容器时全屏"""
+        try:
+            os.makedirs(s.dir, exist_ok=True)
+            tmp = os.path.join(s.dir, ".tmp_shot.png")
+            self.driver.save_screenshot(tmp)
+            import io
+            from PIL import Image
+            img = Image.open(tmp)
+            rect = None
+            try:
+                rect = self.driver.execute_script("""
+                    const c = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
+                    if (!c) return null;
+                    const r = c.getBoundingClientRect();
+                    if (r.width < 100 || r.height < 100) return null;
+                    return {x: r.left, y: r.top, w: r.width, h: r.height, vw: window.innerWidth};
+                """)
+            except Exception:
+                rect = None
+            if rect and img.width > 0:
+                # save_screenshot 输出物理像素, rect 是逻辑像素, 按 viewport 宽度换算
+                scale = img.width / float(rect["vw"]) if rect.get("vw") else 1.0
+                box = (max(0, int(rect["x"] * scale)), max(0, int(rect["y"] * scale)),
+                       min(img.width, int((rect["x"] + rect["w"]) * scale)),
+                       min(img.height, int((rect["y"] + rect["h"]) * scale)))
+                if box[2] - box[0] > 100 and box[3] - box[1] > 100:
+                    cropped = img.crop(box)
+                    buf = io.BytesIO()
+                    cropped.save(buf, format="PNG")
+                    with open(tmp, "wb") as f:
+                        f.write(buf.getvalue())
+            with open(tmp, "rb") as f:
+                data = f.read()
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+            return data
+        except Exception:
+            return None
+
+    def _start_ocr(self, s, path, fname, content_hash):
+        """识别转后台线程: 主循环立刻返回继续盯翻页, 不让 OCR 拖慢抓取"""
+        page_entry = s.pages[-1] if s.pages else {"index": s.index, "page": s.index}
+
+        def ocr_worker():
+            try:
+                text, ok = ocr_image(self.cfg, path)
+            except Exception:
+                text, ok = "", False
+            # OCR 兜底: JS 漏检的动画提示页(整页只有那两行字)在这里清除
+            if ok and is_animation_notice(text):
+                self._remove_page(s, page_entry, path, fname, content_hash)
+                return
+            page_entry["ocr"] = text
+            try:
+                s.flush_meta()
+            except Exception:
+                pass
+            head = text.replace("\n", " ")[:40] if text else ""
+            emit_log(f"第 {page_entry['index']} 张识别" + ("完成" if ok else "失败"))
+            emit({"event": "slide_ocr", "index": page_entry["index"], "file": fname,
+                  "ocr_head": head, "ocr_ok": ok})
+
+        threading.Thread(target=ocr_worker, daemon=True).start()
+
+    def _remove_page(self, s, page_entry, path, fname, content_hash):
+        """删除动画提示页: 文件、pages 记录、去重集合一并撤销"""
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        if page_entry in s.pages:
+            s.pages.remove(page_entry)
+            s.seen_hashes.discard(content_hash)
+        try:
+            s.flush_meta()
+        except Exception:
+            pass
+        emit_log(f"第 {page_entry['index']} 张是动画提示页，已移除")
+        emit({"event": "slide_removed", "index": page_entry["index"], "file": fname})
+        s.emit_session()
 
 
 def run_listen(scan_default=False):
@@ -913,194 +1166,29 @@ def run_listen(scan_default=False):
         emit({"event": "error", "msg": str(e)})
         return
 
-    # 课件扫描状态
-    scan_on = {"on": False}
-    session = {"s": None}   # 当前 SlideSession
-
-    def set_scan(state):
-        scan_on["on"] = state
-        emit({"event": "scan_state", "on": state})
-        emit_log("课件扫描已开启" if state else "课件扫描已关闭")
+    # 课件扫描
+    capture = SlideCapture(cfg, driver)
+    stop_flag = threading.Event()   # GUI 通过 stdin 的 stop 命令优雅退出 (Windows 无 SIGTERM)
 
     stdin_command_loop({
-        "scan_on": lambda c: set_scan(True),
-        "scan_off": lambda c: set_scan(False),
+        "scan_on": lambda c: capture.set_enabled(True),
+        "scan_off": lambda c: capture.set_enabled(False),
+        "stop": lambda c: stop_flag.set(),
     })
 
     emit({"event": "status", "listening": True})
     if scan_default:
-        scan_on["on"] = True
-        emit({"event": "scan_state", "on": True})
-        emit_log("课件扫描已开启 (--scan)")
+        capture.set_enabled(True, " (--scan)")
     prevent_system_sleep()
     answered = set()
     jumped_unfin = set()   # 已自动跳转过的「未完成」题, 每题只跳一次(截止题会永远未完成)
-
-    def handle_slide():
-        """课件翻页检测与抓取, 在监听线程内同步执行; 任何异常只记日志不冒泡"""
-        if not scan_on["on"]:
-            return
-        s = session["s"]
-        seq = (s.index + 1) if s else 0
-        try:
-            _capture_slide()
-        except Exception as e:
-            emit_log(f"第 {seq or '?'} 张: 扫描失败已跳过 ({str(e)[:80]})")
-
-    def _capture_slide():
-        info = driver.execute_script(SLIDE_INFO_JS)
-        if not info or not info.get("sid"):
-            return
-        sid = info["sid"]
-        s = session["s"]
-        if s is None:
-            return  # 还没进课堂, 无课程名
-        if s and sid in s.captured_sids:
-            return
-        if info.get("animated"):
-            return  # 动画提示层盖着, 内容没显示; 不标记 sid, 播完动画后下轮再抓
-        pres_switch = (s.last_pres_id is not None and info.get("presId")
-                       and info.get("presId") != s.last_pres_id)
-        if pres_switch:
-            s.seen_hashes.clear()   # 换课件后内容重新计
-        s.last_pres_id = info.get("presId") or s.last_pres_id
-        s.captured_sids.add(sid)
-
-        # 短暂等待渲染稳定后重取候选; 期间已翻页则作废本次, 下轮循环抓当前页
-        time.sleep(0.7)
-        try:
-            info2 = driver.execute_script(SLIDE_INFO_JS)
-        except Exception:
-            info2 = None
-        if info2 and info2.get("sid") and info2["sid"] != sid:
-            s.captured_sids.discard(sid)
-            return
-        if info2 and info2.get("animated"):
-            return  # 等待期间出现动画层, 作废
-        info = info2 or info
-
-        import hashlib
-
-        def _shot_bytes():
-            """页面截图, 裁到课件区域(去掉侧边栏/弹幕); 取不到容器时全屏"""
-            try:
-                os.makedirs(s.dir, exist_ok=True)
-                tmp = os.path.join(s.dir, ".tmp_shot.png")
-                driver.save_screenshot(tmp)
-                import io
-                from PIL import Image
-                img = Image.open(tmp)
-                rect = None
-                try:
-                    rect = driver.execute_script("""
-                        const c = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
-                        if (!c) return null;
-                        const r = c.getBoundingClientRect();
-                        if (r.width < 100 || r.height < 100) return null;
-                        return {x: r.left, y: r.top, w: r.width, h: r.height, vw: window.innerWidth};
-                    """)
-                except Exception:
-                    rect = None
-                if rect and img.width > 0:
-                    # save_screenshot 输出物理像素, rect 是逻辑像素, 按 viewport 宽度换算
-                    scale = img.width / float(rect["vw"]) if rect.get("vw") else 1.0
-                    box = (max(0, int(rect["x"] * scale)), max(0, int(rect["y"] * scale)),
-                           min(img.width, int((rect["x"] + rect["w"]) * scale)),
-                           min(img.height, int((rect["y"] + rect["h"]) * scale)))
-                    if box[2] - box[0] > 100 and box[3] - box[1] > 100:
-                        cropped = img.crop(box)
-                        buf = io.BytesIO()
-                        cropped.save(buf, format="PNG")
-                        with open(tmp, "wb") as f:
-                            f.write(buf.getvalue())
-                with open(tmp, "rb") as f:
-                    data = f.read()
-                try:
-                    os.remove(tmp)
-                except Exception:
-                    pass
-                return data
-            except Exception:
-                return None
-
-        referer = driver.current_url
-        data = ext = via = url_used = None
-        # 候选已按加载时间新者优先排序; 内容重复(本课件已抓过)的候选换下一个
-        for url in (info.get("candidates") or [])[:4]:
-            if url == s.last_img_url:
-                continue   # 上一张用过的地址不重复抓
-            d2, e2 = download_image(driver, url, referer)
-            if d2 and hashlib.sha1(d2).hexdigest() not in s.seen_hashes:
-                data, ext, via, url_used = d2, e2, "原图下载", url
-                break
-        if data is None:
-            # 原图全失败或全是旧画面 → 截图兜底, 所见即当前页
-            shot = _shot_bytes()
-            if shot is None:
-                emit_log(f"第 {s.index + 1} 张: 截图失败，跳过")
-                return
-            if hashlib.sha1(shot).hexdigest() in s.seen_hashes:
-                emit_log(f"第 {s.index + 1} 张: 画面与已抓内容相同，跳过")
-                return
-            data, ext, via = shot, "png", "页面截图"
-
-        h = hashlib.sha1(data).hexdigest()
-        s.seen_hashes.add(h)
-        if url_used:
-            s.last_img_url = url_used
-        emit_log(f"第 {s.index + 1} 张: {via}")
-        path, fname = s.save_slide(data, ext, page=info.get("page"),
-                                   pres_switch=pres_switch)
-
-        # 识别转后台: 主循环立刻返回继续盯翻页, 不让 OCR 拖慢抓取
-        page_entry = s.pages[-1] if s.pages else {"index": s.index, "page": s.index}
-
-        def ocr_worker():
-            try:
-                text, ok = ocr_image(cfg, path)
-            except Exception:
-                text, ok = "", False
-            # OCR 兜底: JS 漏检的动画提示页(整页只有那两行字)在这里清除
-            if ok and is_animation_notice(text):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-                if page_entry in s.pages:
-                    s.pages.remove(page_entry)
-                    s.seen_hashes.discard(h)
-                try:
-                    s.flush_meta()
-                except Exception:
-                    pass
-                emit_log(f"第 {page_entry['index']} 张是动画提示页，已移除")
-                emit({"event": "slide_removed", "index": page_entry["index"], "file": fname})
-                s.emit_session()
-                return
-            page_entry["ocr"] = text
-            try:
-                s.flush_meta()
-            except Exception:
-                pass
-            head = text.replace("\n", " ")[:40] if text else ""
-            emit_log(f"第 {page_entry['index']} 张识别" + ("完成" if ok else "失败"))
-            emit({"event": "slide_ocr", "index": page_entry["index"], "file": fname,
-                  "ocr_head": head, "ocr_ok": ok})
-
-        threading.Thread(target=ocr_worker, daemon=True).start()
-        if pres_switch:
-            emit_log("检测到课件切换")
-        emit({"event": "slide", "index": s.index,
-              "page": page_entry.get("page", s.index),
-              "file": fname, "ocr_head": "", "ocr_ok": False})
-        s.emit_session()
 
     try:
         driver.get(f"{base_url}/v2/web/index")
         time.sleep(2)
         emit_log("监听已启动")
 
-        while True:
+        while not stop_flag.is_set():
             try:
                 cur_url = driver.current_url or ""
 
@@ -1122,9 +1210,7 @@ def run_listen(scan_default=False):
                         l_id = on_lesson.get("lessonId") or on_lesson.get("lesson_id")
                         c_name = on_lesson.get("courseName") or "雨课堂"
                         emit_log(f"进入课堂: {c_name} (ID {l_id})")
-                        if session["s"] is None or session["s"].course != sanitize_filename(c_name):
-                            session["s"] = SlideSession(cfg)
-                            session["s"].bind_course(c_name)
+                        capture.bind_course(c_name)
                         driver.get(f"{base_url}/lesson/fullscreen/v3/{l_id}")
                         time.sleep(4)
                         continue
@@ -1165,7 +1251,7 @@ def run_listen(scan_default=False):
                     if ev:
                         emit(ev)
 
-                handle_slide()
+                capture.handle_slide()
 
                 time.sleep(interval)
 
@@ -1196,9 +1282,8 @@ def run_listen(scan_default=False):
             driver.quit()
         except Exception:
             pass
-        s = session.get("s")
-        if s:
-            s.flush_meta()
+        if capture.session:
+            capture.session.flush_meta()
         emit({"event": "status", "listening": False})
 
 
@@ -1247,6 +1332,121 @@ def find_and_click_submit(driver, timeout=5.0):
     return False, (last or {}).get("buttons") or []
 
 
+CLICK_OPTION_JS = """
+const ch = arguments[0];
+// 逐个字母调用: 每次点击后 Vue 会重渲染选项列表, 必须重新查询 DOM,
+// 一次查好存数组再点的写法第二个选项起全是已脱离的旧元素, 点了无效
+const widgets = Array.from(document.querySelectorAll(
+    '[class*="option"], [class*="choice"], [class*="answer-item"]'
+)).filter(el => el.offsetWidth > 0 && typeof el.className === 'string'
+    && !/page|nav|slide|thumb|tab|menu/i.test(el.className));
+let hit = widgets.find(el => new RegExp('^' + ch + '([.、．\\\\s]|$)').test((el.textContent || '').trim()));
+if (!hit) {
+    const allEls = Array.from(document.querySelectorAll('p, span, div, li'));
+    hit = allEls.find(el => el.children.length === 0 && el.textContent.trim() === ch && el.offsetWidth > 0);
+}
+if (hit) {
+    hit.click();
+    if (hit.parentElement) hit.parentElement.click();
+    return true;
+}
+return false;
+"""
+
+COUNT_SELECTED_JS = """
+return Array.from(document.querySelectorAll(
+    '[class*="option"], [class*="choice"], [class*="answer-item"]'
+)).filter(el => {
+    const c = typeof el.className === 'string' ? el.className : '';
+    return el.offsetWidth > 0 && /select|active|checked|chosen/i.test(c);
+}).length;
+"""
+
+
+def click_choice_options(driver, answer):
+    """按答案字母逐个点击选项(每击重新查 DOM), 返回点击后选中的选项数"""
+    letters = list(dict.fromkeys(c for c in answer.upper() if 'A' <= c <= 'Z'))
+    for ch in letters:
+        try:
+            driver.execute_script(CLICK_OPTION_JS, ch)
+        except Exception:
+            continue
+        time.sleep(0.15)
+    time.sleep(0.8)
+    try:
+        return driver.execute_script(COUNT_SELECTED_JS) or 0
+    except Exception:
+        return 0
+
+
+ZUODA_CLICK_JS = """
+const all = Array.from(document.querySelectorAll('*'));
+const zuoda = all.find(el => el.children.length === 0 && el.textContent.trim() === '作答' && el.offsetWidth > 0);
+if (zuoda) {
+    zuoda.click();
+    if (zuoda.parentElement) zuoda.parentElement.click();
+}
+"""
+
+COUNT_BLANKS_JS = """
+const drawer = document.querySelector('[class*="drawer"], [class*="sheet"], [class*="sidebar"]');
+const root = drawer || document;
+return Array.from(root.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]'))
+    .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0).length;
+"""
+
+FILL_BLANKS_JS = """
+const answers = arguments[0];
+const drawer = document.querySelector('[class*="drawer"], [class*="sheet"], [class*="sidebar"]');
+const root = drawer || document;
+let taList = Array.from(root.querySelectorAll('textarea.blank__input, input.blank__input, textarea, input[type="text"], [contenteditable="true"]'))
+    .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0);
+if (taList.length === 0) taList = Array.from(document.querySelectorAll('textarea, input[type="text"]'));
+for (let i = 0; i < taList.length; i++) {
+    const ta = taList[i];
+    const val = i < answers.length ? answers[i] : (answers.length === 1 ? answers[0] : '');
+    ta.focus();
+    if (ta.tagName === 'TEXTAREA' || ta.tagName === 'INPUT') {
+        ta.value = val;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+        ta.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ' }));
+    } else {
+        ta.innerText = val;
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+}
+"""
+
+
+def fill_blank_answer(driver, answer, q_type):
+    """打开作答抽屉并填入填空/主观题答案; 多空按竖线拆分"""
+    driver.execute_script(ZUODA_CLICK_JS)
+    time.sleep(1.5)
+    detected = driver.execute_script(COUNT_BLANKS_JS) or 0
+    if "主观" in q_type:
+        ans_list = [answer]
+    else:
+        ans_list = split_blank_answers(answer, expected_count=detected)
+    driver.execute_script(FILL_BLANKS_JS, ans_list)
+    time.sleep(1)
+
+
+def submit_answer(driver, auto_submit):
+    """提交作答; 返回提交状态描述"""
+    if not auto_submit:
+        emit_log("自动提交已关闭，答案已填入")
+        return "未自动提交"
+    ok, extra = find_and_click_submit(driver, timeout=SUBMIT_WAIT_SECONDS)
+    if ok:
+        emit_log("已提交")
+        return "已提交"
+    btns = "、".join((extra or [])[:12]) if extra else "无"
+    emit_log(f"未找到提交按钮（部分题型选中即自动提交；页面可见按钮: {btns}）")
+    return "未找到提交按钮"
+
+
 def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
     q_type = quiz_info.get("qType", "单选题")
     options = quiz_info.get("options", ["A", "B", "C", "D"])
@@ -1271,99 +1471,14 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
     submit_desc = "未自动提交"
     try:
         if "选" in q_type:
-            # 逐个字母点: 每次点击后 Vue 会重渲染选项列表, 必须重新查询 DOM,
-            # 一次查好存数组再点的写法第二个选项起全是已脱离的旧元素, 点了无效
-            letters = list(dict.fromkeys(c for c in ans.upper() if 'A' <= c <= 'Z'))
-            for ch in letters:
-                driver.execute_script("""
-                    const ch = arguments[0];
-                    const widgets = Array.from(document.querySelectorAll(
-                        '[class*="option"], [class*="choice"], [class*="answer-item"]'
-                    )).filter(el => el.offsetWidth > 0 && typeof el.className === 'string'
-                        && !/page|nav|slide|thumb|tab|menu/i.test(el.className));
-                    let hit = widgets.find(el => new RegExp('^' + ch + '([.、．\\\\s]|$)').test((el.textContent || '').trim()));
-                    if (!hit) {
-                        const allEls = Array.from(document.querySelectorAll('p, span, div, li'));
-                        hit = allEls.find(el => el.children.length === 0 && el.textContent.trim() === ch && el.offsetWidth > 0);
-                    }
-                    if (hit) {
-                        hit.click();
-                        if (hit.parentElement) hit.parentElement.click();
-                    }
-                """, ch)
-                time.sleep(0.15)
-            time.sleep(0.8)
-            try:
-                n_sel = driver.execute_script("""
-                    return Array.from(document.querySelectorAll(
-                        '[class*="option"], [class*="choice"], [class*="answer-item"]'
-                    )).filter(el => {
-                        const c = typeof el.className === 'string' ? el.className : '';
-                        return el.offsetWidth > 0 && /select|active|checked|chosen/i.test(c);
-                    }).length;
-                """) or 0
-                if n_sel:
-                    emit_log(f"已选中 {n_sel} 个选项")
-            except Exception:
-                pass
+            n_sel = click_choice_options(driver, ans)
+            if n_sel:
+                emit_log(f"已选中 {n_sel} 个选项")
 
         if "填空" in q_type or "主观" in q_type:
-            driver.execute_script("""
-                const all = Array.from(document.querySelectorAll('*'));
-                const zuoda = all.find(el => el.children.length === 0 && el.textContent.trim() === '作答' && el.offsetWidth > 0);
-                if (zuoda) {
-                    zuoda.click();
-                    if (zuoda.parentElement) zuoda.parentElement.click();
-                }
-            """)
-            time.sleep(1.5)
-            detected = driver.execute_script("""
-                const drawer = document.querySelector('[class*="drawer"], [class*="sheet"], [class*="sidebar"]');
-                const root = drawer || document;
-                return Array.from(root.querySelectorAll('textarea, input[type="text"], [contenteditable="true"]'))
-                    .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0).length;
-            """) or 0
-            if "主观" in q_type:
-                ans_list = [ans]
-            else:
-                ans_list = split_blank_answers(ans, expected_count=detected)
-            driver.execute_script("""
-                const answers = arguments[0];
-                const drawer = document.querySelector('[class*="drawer"], [class*="sheet"], [class*="sidebar"]');
-                const root = drawer || document;
-                let taList = Array.from(root.querySelectorAll('textarea.blank__input, input.blank__input, textarea, input[type="text"], [contenteditable="true"]'))
-                    .filter(el => el.offsetWidth > 0 || el.offsetHeight > 0);
-                if (taList.length === 0) taList = Array.from(document.querySelectorAll('textarea, input[type="text"]'));
-                for (let i = 0; i < taList.length; i++) {
-                    const ta = taList[i];
-                    const val = i < answers.length ? answers[i] : (answers.length === 1 ? answers[0] : '');
-                    ta.focus();
-                    if (ta.tagName === 'TEXTAREA' || ta.tagName === 'INPUT') {
-                        ta.value = val;
-                        ta.dispatchEvent(new Event('input', { bubbles: true }));
-                        ta.dispatchEvent(new Event('change', { bubbles: true }));
-                        ta.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ' }));
-                    } else {
-                        ta.innerText = val;
-                        ta.dispatchEvent(new Event('input', { bubbles: true }));
-                        ta.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }
-            """, ans_list)
-            time.sleep(1)
+            fill_blank_answer(driver, ans, q_type)
 
-        if auto_submit:
-            ok, extra = find_and_click_submit(driver, timeout=5.0)
-            if ok:
-                submit_desc = "已提交"
-                emit_log("已提交")
-            else:
-                btns = "、".join((extra or [])[:12]) if extra else "无"
-                submit_desc = "未找到提交按钮"
-                emit_log(f"未找到提交按钮（部分题型选中即自动提交；页面可见按钮: {btns}）")
-        else:
-            emit_log("自动提交已关闭，答案已填入")
-            submit_desc = "未自动提交"
+        submit_desc = submit_answer(driver, auto_submit)
     except Exception as e:
         submit_desc = f"作答异常: {str(e)[:60]}"
         emit_log(submit_desc)
