@@ -589,6 +589,18 @@ return (function() {
     out.page = cs ? (cs.page || cs.index || cs.pageNum || cs.num || null) : null;
     out.presId = store ? (store.presentationId || (store.presentation && store.presentation.id) || null) : null;
 
+    // 动画页: 雨课堂盖着「当前页面有动画」提示层, 此时课件内容还没显示, 抓了也是提示图
+    out.animated = false;
+    try {
+        for (const el of document.querySelectorAll('div, p, span')) {
+            const t = el.textContent || '';
+            if ((t.includes('当前页面有动画') || t.includes('请先听老师讲解')) && el.offsetWidth > 0 && el.children.length <= 2) {
+                out.animated = true;
+                break;
+            }
+        }
+    } catch(e) {}
+
     // 搜索范围含 iframe (课件可能渲染在 iframe 里)
     const roots = [document];
     try {
@@ -679,7 +691,7 @@ class SlideSession:
         self.captured_sids = set()
         self.last_pres_id = None
         self.last_img_url = None
-        self.last_content_hash = None
+        self.seen_hashes = set()   # 本课件已保存的内容哈希(按 pres 分组, 换 pres 清空)
         self.index = 0
         self.meta_lock = threading.Lock()   # OCR 后台线程与主线程都会写 slides.json
 
@@ -733,6 +745,12 @@ class SlideSession:
                 with open(os.path.join(self.dir, "slides.json"), "w", encoding="utf-8") as f:
                     json.dump({"date": self.date, "course": self.course, "pages": self.pages},
                               f, ensure_ascii=False, indent=1)
+
+
+def is_animation_notice(text):
+    """OCR 出来的文本是否只是「当前页面有动画」提示层(雨课堂在动画页盖的覆盖层)"""
+    t = (text or "").replace("\n", "").replace(" ", "")
+    return 0 < len(t) < 30 and "动画" in t
 
 
 def download_image(driver, url, referer):
@@ -940,8 +958,12 @@ def run_listen(scan_default=False):
             return  # 还没进课堂, 无课程名
         if s and sid in s.captured_sids:
             return
+        if info.get("animated"):
+            return  # 动画提示层盖着, 内容没显示; 不标记 sid, 播完动画后下轮再抓
         pres_switch = (s.last_pres_id is not None and info.get("presId")
                        and info.get("presId") != s.last_pres_id)
+        if pres_switch:
+            s.seen_hashes.clear()   # 换课件后内容重新计
         s.last_pres_id = info.get("presId") or s.last_pres_id
         s.captured_sids.add(sid)
 
@@ -954,15 +976,44 @@ def run_listen(scan_default=False):
         if info2 and info2.get("sid") and info2["sid"] != sid:
             s.captured_sids.discard(sid)
             return
+        if info2 and info2.get("animated"):
+            return  # 等待期间出现动画层, 作废
         info = info2 or info
 
         import hashlib
 
         def _shot_bytes():
+            """页面截图, 裁到课件区域(去掉侧边栏/弹幕); 取不到容器时全屏"""
             try:
                 os.makedirs(s.dir, exist_ok=True)
                 tmp = os.path.join(s.dir, ".tmp_shot.png")
                 driver.save_screenshot(tmp)
+                import io
+                from PIL import Image
+                img = Image.open(tmp)
+                rect = None
+                try:
+                    rect = driver.execute_script("""
+                        const c = document.querySelector('.ppt__wrapper, .lesson__page, .presentation, .center-area');
+                        if (!c) return null;
+                        const r = c.getBoundingClientRect();
+                        if (r.width < 100 || r.height < 100) return null;
+                        return {x: r.left, y: r.top, w: r.width, h: r.height, vw: window.innerWidth};
+                    """)
+                except Exception:
+                    rect = None
+                if rect and img.width > 0:
+                    # save_screenshot 输出物理像素, rect 是逻辑像素, 按 viewport 宽度换算
+                    scale = img.width / float(rect["vw"]) if rect.get("vw") else 1.0
+                    box = (max(0, int(rect["x"] * scale)), max(0, int(rect["y"] * scale)),
+                           min(img.width, int((rect["x"] + rect["w"]) * scale)),
+                           min(img.height, int((rect["y"] + rect["h"]) * scale)))
+                    if box[2] - box[0] > 100 and box[3] - box[1] > 100:
+                        cropped = img.crop(box)
+                        buf = io.BytesIO()
+                        cropped.save(buf, format="PNG")
+                        with open(tmp, "wb") as f:
+                            f.write(buf.getvalue())
                 with open(tmp, "rb") as f:
                     data = f.read()
                 try:
@@ -974,14 +1025,13 @@ def run_listen(scan_default=False):
                 return None
 
         referer = driver.current_url
-        last_h = s.last_content_hash
         data = ext = via = url_used = None
-        # 候选已按加载时间新者优先排序; 内容与上一张相同的候选换下一个
+        # 候选已按加载时间新者优先排序; 内容重复(本课件已抓过)的候选换下一个
         for url in (info.get("candidates") or [])[:4]:
             if url == s.last_img_url:
                 continue   # 上一张用过的地址不重复抓
             d2, e2 = download_image(driver, url, referer)
-            if d2 and hashlib.sha1(d2).hexdigest() != last_h:
+            if d2 and hashlib.sha1(d2).hexdigest() not in s.seen_hashes:
                 data, ext, via, url_used = d2, e2, "原图下载", url
                 break
         if data is None:
@@ -990,13 +1040,13 @@ def run_listen(scan_default=False):
             if shot is None:
                 emit_log(f"第 {s.index + 1} 张: 截图失败，跳过")
                 return
-            if last_h and hashlib.sha1(shot).hexdigest() == last_h:
-                emit_log(f"第 {s.index + 1} 张: 画面与上一张相同，跳过")
+            if hashlib.sha1(shot).hexdigest() in s.seen_hashes:
+                emit_log(f"第 {s.index + 1} 张: 画面与已抓内容相同，跳过")
                 return
             data, ext, via = shot, "png", "页面截图"
 
         h = hashlib.sha1(data).hexdigest()
-        s.last_content_hash = h
+        s.seen_hashes.add(h)
         if url_used:
             s.last_img_url = url_used
         emit_log(f"第 {s.index + 1} 张: {via}")
@@ -1011,6 +1061,23 @@ def run_listen(scan_default=False):
                 text, ok = ocr_image(cfg, path)
             except Exception:
                 text, ok = "", False
+            # OCR 兜底: JS 漏检的动画提示页(整页只有那两行字)在这里清除
+            if ok and is_animation_notice(text):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                if page_entry in s.pages:
+                    s.pages.remove(page_entry)
+                    s.seen_hashes.discard(h)
+                try:
+                    s.flush_meta()
+                except Exception:
+                    pass
+                emit_log(f"第 {page_entry['index']} 张是动画提示页，已移除")
+                emit({"event": "slide_removed", "index": page_entry["index"], "file": fname})
+                s.emit_session()
+                return
             page_entry["ocr"] = text
             try:
                 s.flush_meta()
