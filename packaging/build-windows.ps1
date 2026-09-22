@@ -2,6 +2,7 @@
 # 产物: dist\ykt-helper-gui\ (绿色目录) + dist\installer\*-setup.exe (Inno Setup 安装包)
 $ErrorActionPreference = "Stop"
 $CD_VERSION = "153.0.8010.50"
+Start-Transcript -Path "build-log.txt" -Force
 
 Write-Host "[1/5] 下载 chromedriver win64 $CD_VERSION ..."
 $ok = $false
@@ -31,9 +32,18 @@ Write-Host "[4/5] 合并产物 ..."
 Copy-Item "dist\engine\engine.exe" "dist\ykt-helper-gui\engine.exe" -Force
 
 Write-Host "[5/5] Inno Setup 安装包 ..."
+# Inno 6.3 之前不含官方中文语言文件, 缺了就从官方仓库补
+$langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
+if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
+    Write-Host "  ChineseSimplified.isl 缺失, 从官方仓库下载..."
+    New-Item -ItemType Directory -Force -Path $langDir | Out-Null
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl" `
+        -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
+}
 $iscc = Get-Command iscc -ErrorAction SilentlyContinue
 if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
 & $iscc.ToString() "packaging\installer.iss"
 if ($LASTEXITCODE -ne 0) { throw "ISCC 失败" }
 
+Stop-Transcript
 Write-Host "完成: dist\ykt-helper-gui\ 与 dist\installer\"

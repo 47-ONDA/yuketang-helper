@@ -27,6 +27,13 @@ jobs:
         shell: pwsh
         run: ./packaging/build-windows.ps1
 
+      - name: 上传构建日志 (失败排障)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build-log.txt
+
       - name: 上传绿色目录
         uses: actions/upload-artifact@v4
         with:
