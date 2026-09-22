@@ -4,12 +4,12 @@
 [Setup]
 AppId={{8E5C2F1A-6B7D-4A0E-9C3F-5A1B2C3D4E5F}
 AppName=雨课堂助手
-AppVersion=1.1.0
-AppVerName=雨课堂助手 1.1.0
+AppVersion=1.1.1
+AppVerName=雨课堂助手 1.1.1
 DefaultDirName={autopf}\YuketangHelper
 DefaultGroupName=雨课堂助手
 OutputDir=..\dist\installer
-OutputBaseFilename=yuketang-helper-1.1.0-windows-setup
+OutputBaseFilename=yuketang-helper-1.1.1-windows-setup
 Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible

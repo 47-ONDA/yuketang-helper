@@ -32,7 +32,10 @@ jobs:
       - name: 启动冒烟测试 (exe 必须能跑起来)
         shell: pwsh
         run: |
-          $out = (& "dist\engine\engine.exe" cache-list 2>&1 | Out-String).Trim()
+          $exe = Join-Path $env:GITHUB_WORKSPACE "dist\engine\engine.exe"
+          Write-Host "dist 内容:"; Get-ChildItem dist | ForEach-Object { Write-Host "  $($_.Name)" }
+          if (-not (Test-Path $exe)) { Write-Host "::error::engine.exe 不存在: $exe"; exit 1 }
+          $out = (& $exe cache-list 2>&1 | Out-String).Trim()
           Write-Host $out
           $out | Set-Content smoke-output.txt
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::engine.exe exit $LASTEXITCODE`n$out"; exit 1 }
