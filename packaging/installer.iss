@@ -2,7 +2,7 @@
 ; 由 packaging/build-windows.ps1 调用, 输出到 dist\installer\
 
 [Setup]
-AppId={8E5C2F1A-6B7D-4A0E-9C3F-5A1B2C3D4E5F}
+AppId={{8E5C2F1A-6B7D-4A0E-9C3F-5A1B2C3D4E5F}
 AppName=雨课堂助手
 AppVersion=1.1.0
 AppVerName=雨课堂助手 1.1.0
