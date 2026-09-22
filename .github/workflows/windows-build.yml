@@ -1,14 +1,7 @@
 name: windows-build
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "engine/**"
-      - "gui/**"
-      - "packaging/**"
-      - ".github/workflows/windows-build.yml"
-  workflow_dispatch:
+  workflow_dispatch: {}   # 仅手动触发: Actions 页 → windows-build → Run workflow
 
 jobs:
   build-windows:
