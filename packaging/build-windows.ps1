@@ -34,7 +34,8 @@ Run-Step "pip 引擎依赖" { python -m pip install -r engine/requirements.txt }
 Run-Step "pip 安装 PyInstaller" { python -m pip install pyinstaller }
 
 Write-Host "[3/5] PyInstaller 打包 ..."
-Run-Step "PyInstaller engine" { python -m PyInstaller --noconfirm --clean --name engine --console --onefile --add-binary "engine/chromedriver.exe;." engine/engine.py }
+# selenium 内部大量动态导入(webdriver.Chrome 等), 必须整包收集, 否则运行时 No module named
+Run-Step "PyInstaller engine" { python -m PyInstaller --noconfirm --clean --name engine --console --onefile --collect-all selenium --add-binary "engine/chromedriver.exe;." engine/engine.py }
 Run-Step "PyInstaller gui" { python -m PyInstaller --noconfirm --clean --name ykt-helper-gui --windowed gui/gui.py }
 Write-Host "  dist 内容:"
 Get-ChildItem -Recurse dist | Select-Object -ExpandProperty FullName
