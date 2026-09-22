@@ -74,6 +74,10 @@ class EngineProcess:
                     break
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line.startswith("{"):
+                    # 引擎的报错原文(traceback / chromedriver 错误)不是 JSON,
+                    # 原样透传到日志页——否则启动失败时界面毫无线索
+                    if line:
+                        self.on_event({"event": "log", "msg": "引擎: " + line})
                     continue
                 try:
                     self.on_event(json.loads(line))
