@@ -36,6 +36,7 @@ import argparse
 import threading
 import subprocess
 import base64
+import hashlib
 import platform
 
 import requests
@@ -88,15 +89,15 @@ BROWSER_APPS = _default_browser_paths()
 DEFAULT_CONFIG = {
     "yuketang_base_url": "https://changjiang.yuketang.cn",
     "browser": "chrome",
-    "api_base": "",
+    "api_base": "https://api.deepseek.com/v1",
     "api_key": "",
-    "models": [],
+    "models": ["deepseek-flash"],
     "enable_multimodal": True,
-    "multimodal_models": [],
+    "multimodal_models": ["deepseek-flash"],
     "auto_submit": True,
     "listen_interval": 1.0,
-    "ocr_primary": {"api_base": "", "api_key": "", "model": ""},
-    "ocr_backup": {"api_base": "", "api_key": "", "model": ""},
+    "ocr_primary": {"api_base": "https://paddleocr.aistudio-app.com", "api_key": "", "model": "PaddleOCR-VL-1.6"},
+    "ocr_backup": {"api_base": "https://open.bigmodel.cn/api/paas/v4", "api_key": "", "model": "glm-4v-flash"},
     "slide_dir": "~/Documents/雨课堂课件",
 }
 
@@ -193,18 +194,21 @@ def restore_system_sleep():
             pass
 
 
-_KILL_PS_TEMPLATE = ("Get-CimInstance Win32_Process | "
-                     "Where-Object { $_.CommandLine -like '*PROFILE_PATTERN*' } | "
-                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+_KILL_PS_TEMPLATE = ("& { param($pat) Get-CimInstance Win32_Process | "
+                     "Where-Object { $_.CommandLine -like ('*' + $pat + '*') "
+                     "-and $_.ProcessId -ne $PID "
+                     "-and ($_.Name -eq 'chrome.exe' -or $_.Name -eq 'msedge.exe') } | "
+                     "ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }")
 
 
 def kill_profile_browsers(force=False):
-    """按 user-data-dir 杀掉残留的浏览器进程 (跨平台)"""
+    """按 user-data-dir 杀掉残留的浏览器进程 (跨平台)
+    Windows 用参数传递路径(避免引号/通配符注入), 排除自身并限定浏览器进程名"""
     pattern = f"--user-data-dir={PROFILE_DIR}"
     try:
         if IS_WINDOWS:
             subprocess.run(["powershell", "-NoProfile", "-Command",
-                            _KILL_PS_TEMPLATE.replace("PROFILE_PATTERN", pattern)],
+                            _KILL_PS_TEMPLATE, pattern],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             args = ["pkill", "-f", pattern]
@@ -303,8 +307,52 @@ def _pick_version_for_milestone(versions, major):
     return max(cands, key=lambda v: [int(x) for x in v.split(".")])
 
 
+def _download_and_validate(zip_url, exe_name, dest_dir):
+    """下载 zip -> 解压目标驱动 -> 校验可执行; 成功返回最终路径, 失败返回 None"""
+    os.makedirs(dest_dir, exist_ok=True)
+    exe_path = os.path.join(dest_dir, exe_name)
+    tmp_exe = exe_path + ".tmp"
+    zpath = os.path.join(dest_dir, "driver.zip")
+    try:
+        r = requests.get(zip_url, timeout=120, stream=True)
+        r.raise_for_status()
+        with open(zpath, "wb") as f:
+            for chunk in r.iter_content(65536):
+                f.write(chunk)
+        import zipfile
+        hit = None
+        with zipfile.ZipFile(zpath) as z:
+            for info in z.namelist():
+                # 精确匹配文件名, 避免 LICENSE.chromedriver 这类同名尾缀文件抢先
+                if os.path.basename(info) == exe_name:
+                    hit = info
+                    break
+        if not hit:
+            return None
+        with zipfile.ZipFile(zpath) as z:
+            with z.open(hit) as src, open(tmp_exe, "wb") as dst:
+                dst.write(src.read())
+        if os.path.getsize(tmp_exe) < 1024 * 1024:
+            return None   # 明显不是真驱动
+        if not IS_WINDOWS:
+            os.chmod(tmp_exe, 0o755)
+        ver = _detect_driver_version(tmp_exe)
+        if not ver:
+            return None   # 无法执行/损坏
+        os.replace(tmp_exe, exe_path)
+        return exe_path
+    except Exception:
+        return None
+    finally:
+        for tmp in (zpath, tmp_exe):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
 def _download_driver(major, browser="chrome"):
-    """下载与大版本匹配的驱动到缓存目录, 返回可执行文件路径; 失败返回 None"""
+    """下载与大版本匹配的驱动: 每个源做「查版本→下载→校验」完整尝试, 失败换下一源"""
     if browser == "edge":
         return None   # Edge 走手动配置, 不做自动下载
     plat = _driver_platform()
@@ -317,66 +365,44 @@ def _download_driver(major, browser="chrome"):
         os.remove(exe_path)
     except Exception:
         pass
-    full = None
-    zip_url = None
-    # 源一: npmmirror 国内镜像, 列目录找该大版本最新
-    try:
+
+    def mirror_source():
         r = requests.get(f"{CHROMETESTING_MIRROR}/", timeout=15)
         names = [item.get("name", "").rstrip("/")
                  for item in r.json() if isinstance(item, dict)]
         names = [n for n in names if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", n)]
         full = _pick_version_for_milestone(names, major)
-        if full:
-            # npmmirror 镜像比官方桶多一层平台子目录
-            zip_url = f"{CHROMETESTING_MIRROR}/{full}/{plat}/chromedriver-{plat}.zip"
-    except Exception:
-        pass
-    # 源二: 官方 known-good-versions
-    if not zip_url:
+        # npmmirror 镜像比官方桶多一层平台子目录
+        return (full, f"{CHROMETESTING_MIRROR}/{full}/{plat}/chromedriver-{plat}.zip") if full else (None, None)
+
+    def official_source():
+        r = requests.get(f"{CHROMETESTING_OFFICIAL}/known-good-versions-with-downloads.json", timeout=20)
+        versions = r.json().get("versions", [])
+        vs = [v["version"] for v in versions
+              if v.get("version", "").split(".")[0] == str(major)
+              and any(d.get("platform") == plat for d in v.get("downloads", {}).get("chromedriver", []))]
+        full = _pick_version_for_milestone(vs, major)
+        for v in versions:
+            if v.get("version") == full:
+                for d in v["downloads"]["chromedriver"]:
+                    if d.get("platform") == plat:
+                        return full, d["url"]
+        return None, None
+
+    for source_name, source in (("npmmirror", mirror_source), ("官方", official_source)):
         try:
-            r = requests.get(f"{CHROMETESTING_OFFICIAL}/known-good-versions-with-downloads.json", timeout=20)
-            vs = [v["version"] for v in r.json().get("versions", [])
-                  if v.get("version", "").split(".")[0] == str(major)
-                  and any(d.get("platform") == plat for d in v.get("downloads", {}).get("chromedriver", []))]
-            full = _pick_version_for_milestone(vs, major)
-            if full:
-                for v in r.json().get("versions", []):
-                    if v.get("version") == full:
-                        for d in v["downloads"]["chromedriver"]:
-                            if d.get("platform") == plat:
-                                zip_url = d["url"]
-        except Exception:
-            pass
-    if not zip_url:
-        return None
-    os.makedirs(dest_dir, exist_ok=True)
-    zpath = os.path.join(dest_dir, "driver.zip")
-    try:
-        r = requests.get(zip_url, timeout=120, stream=True)
-        r.raise_for_status()
-        with open(zpath, "wb") as f:
-            for chunk in r.iter_content(65536):
-                f.write(chunk)
-        import zipfile
-        with zipfile.ZipFile(zpath) as z:
-            for info in z.namelist():
-                # 精确匹配文件名, 避免 LICENSE.chromedriver 这类同名尾缀文件抢先
-                if os.path.basename(info) == exe_name:
-                    with z.open(info) as src, open(exe_path, "wb") as dst:
-                        dst.write(src.read())
-                    break
-        if not IS_WINDOWS:
-            os.chmod(exe_path, 0o755)
-        emit_log(f"已自动下载 {browser} 驱动 {full}")
-        return exe_path if os.path.exists(exe_path) else None
-    except Exception as e:
-        emit_log(f"自动下载驱动失败: {str(e)[:100]}")
-        return None
-    finally:
-        try:
-            os.remove(zpath)
-        except Exception:
-            pass
+            full, zip_url = source()
+        except Exception as e:
+            emit_log(f"驱动源 {source_name} 查询失败: {str(e)[:80]}")
+            continue
+        if not zip_url:
+            continue
+        path = _download_and_validate(zip_url, exe_name, dest_dir)
+        if path:
+            emit_log(f"已自动下载 chrome 驱动 {full}（源: {source_name}）")
+            return path
+        emit_log(f"驱动源 {source_name} 下载或校验失败，换下一源")
+    return None
 
 
 def pick_driver(browser="chrome"):
@@ -426,8 +452,14 @@ def _cached_driver_for(major):
         for d in sorted(glob.glob(os.path.join(DRIVER_CACHE_DIR, f"chrome-*")), reverse=True):
             if d.split("chrome-")[-1].split("-")[0] == str(major):
                 p = os.path.join(d, exe_name)
-                if os.path.exists(p):
+                # 缓存必须可执行且版本对得上, 坏文件直接作废
+                if os.path.exists(p) and os.path.getsize(p) > 1024 * 1024 \
+                        and (eng_ver := _detect_driver_version(p)) and eng_ver.split(".")[0] == str(major):
                     return p
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
     except Exception:
         pass
     return None
@@ -500,7 +532,8 @@ def _launch_browser(cfg, headless):
 # ---------------------------------------------------------------------------
 
 def _chat(api_base, api_key, model, messages, timeout=15, max_tokens=500, temperature=0.1):
-    """OpenAI 兼容调用; deepseek 接口关闭深度思考以保证响应速度"""
+    """OpenAI 兼容调用; deepseek 接口关闭深度思考以保证响应速度。
+    部分平台(如智谱)有 1024 上限: 先按请求值发送, 报参数错误再降级重试一次"""
     payload = {
         "model": model,
         "messages": messages,
@@ -509,8 +542,19 @@ def _chat(api_base, api_key, model, messages, timeout=15, max_tokens=500, temper
     }
     if "deepseek" in api_base:
         payload["thinking"] = {"type": "disabled"}
-    else:
-        payload["max_tokens"] = min(max_tokens, 1024)  # 部分平台(如智谱)上限 1024
+    try:
+        return _chat_request(api_base, api_key, payload, timeout)
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        if e.response is not None:
+            body = (e.response.text or "")[:300]
+        if "max_tokens" in body and max_tokens > 1024:
+            payload["max_tokens"] = 1024
+            return _chat_request(api_base, api_key, payload, timeout)
+        raise
+
+
+def _chat_request(api_base, api_key, payload, timeout):
     r = requests.post(f"{api_base.rstrip('/')}/chat/completions",
                       headers={"Authorization": f"Bearer {api_key}",
                                "Content-Type": "application/json"},
@@ -536,18 +580,19 @@ def image_content(prompt, img_path):
     ]
 
 
-def call_solver(cfg, question_text, q_type, options=None, image_path=None):
-    api_base = cfg.get("api_base", "").rstrip("/")
-    api_key = cfg.get("api_key", "")
-    models_pool = list(cfg.get("models", []))
-    enable_mm = cfg.get("enable_multimodal", True)
-    mm_models = list(cfg.get("multimodal_models", []))
+class SolverUnavailable(RuntimeError):
+    """模型不可用(未配置/全部调用失败): 调用方必须放弃作答而不是填假答案"""
 
-    if not api_key or api_key == "YOUR_API_KEY_HERE" or not api_base or not models_pool:
-        emit_log("模型 API 未配置")
-        if "单选" in q_type: return "C"
-        elif "多选" in q_type: return "ABCD"
-        return "已收到并作答"
+
+def call_solver(cfg, question_text, q_type, options=None, image_path=None):
+    api_base = cfg.get("api_base", DEFAULT_CONFIG["api_base"]).rstrip("/")
+    api_key = cfg.get("api_key", "")
+    models_pool = list(cfg.get("models", DEFAULT_CONFIG["models"]))
+    enable_mm = cfg.get("enable_multimodal", True)
+    mm_models = list(cfg.get("multimodal_models", DEFAULT_CONFIG["multimodal_models"]))
+
+    if not api_key or api_key == "YOUR_API_KEY_HERE":
+        raise SolverUnavailable("模型 API 未配置，无法作答（请在设置中填写）")
 
     opt_str = f"\n可选选项: {', '.join(options)}" if options else ""
     prompt = f"""你是一个大学课堂随堂测验答题专家。请根据以下题目内容（若附带图像请分析其中的图表与排版）给出高准确率的回答：
@@ -616,9 +661,7 @@ def call_solver(cfg, question_text, q_type, options=None, image_path=None):
                 break
             time.sleep(0.5)
 
-    if "单选" in q_type: return "C"
-    elif "多选" in q_type: return "ABCD"
-    return "已收到并作答"
+    raise SolverUnavailable("所有模型调用均失败（网络或服务异常），本题未作答")
 
 
 OCR_PROMPT = "提取图片中的全部文字，按阅读顺序输出为纯文本，保留段落与标题换行，不要添加任何解释。"
@@ -959,7 +1002,13 @@ class SlideSession:
     def bind_course(self, course_name):
         if self.course is None and course_name:
             self.course = sanitize_filename(course_name)
-            self.dir = os.path.join(SLIDE_CACHE_ROOT, f"{self.date}-{self.course}")
+            # 同课程同日多次监听各用独立目录, 重启不覆盖之前的扫描
+            base = f"{self.date}-{time.strftime('%H%M')}-{self.course}"
+            d, n = base, 2
+            while os.path.exists(os.path.join(SLIDE_CACHE_ROOT, d)):
+                d = f"{base}-{n}"
+                n += 1
+            self.dir = os.path.join(SLIDE_CACHE_ROOT, d)
             os.makedirs(self.dir, exist_ok=True)
             self.emit_session()
 
@@ -1075,14 +1124,30 @@ def run_scan():
                 force_logout(driver, base_url)
         except Exception:
             pass
+        cancelled = False
         for _ in range(200):
             time.sleep(1.5)
             try:
                 st = driver.execute_script(LOGIN_STATE_JS)
             except WebDriverException:
-                emit_log("浏览器已关闭，登录态已保存")
-                ok = True
-                break
+                # 浏览器被关闭: 不代表登录成功。重新拉起浏览器验证 profile 里的登录态
+                emit_log("浏览器已关闭，正在验证登录状态…")
+                try:
+                    driver = get_driver(cfg, headless=False)
+                    driver.get(f"{base_url}/v2/web/index")
+                    time.sleep(3)
+                    st2 = driver.execute_script(LOGIN_STATE_JS) or {}
+                    if st2.get("logged"):
+                        ok = True
+                        name = st2.get("name")
+                        break
+                    cancelled = True
+                    emit_log("未检测到登录态，登录已取消")
+                    break
+                except Exception:
+                    cancelled = True
+                    emit_log("无法验证登录态，登录已取消")
+                    break
             except Exception:
                 continue
             if st and st.get("logged"):
@@ -1099,6 +1164,8 @@ def run_scan():
             save_state(name)
             emit_log(f"登录成功: {name if name else '已登录'}")
             emit({"event": "login", "ok": True, "name": name})
+        elif cancelled:
+            emit({"event": "login", "ok": False, "name": None})
         else:
             emit_log("5 分钟未检测到登录")
             emit({"event": "login", "ok": False, "name": None})
@@ -1114,13 +1181,13 @@ def save_state(name):
     state = {}
     if os.path.exists(STATE_PATH):
         try:
-            with open(STATE_PATH) as f:
+            with open(STATE_PATH, encoding="utf-8") as f:
                 state = json.load(f)
         except Exception:
             pass
     state["logged_in_as"] = name or state.get("logged_in_as")
     state["last_login_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(STATE_PATH, "w") as f:
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
@@ -1205,6 +1272,7 @@ class SlideCapture:
         if pres_switch:
             s.seen_hashes.clear()   # 换课件后内容重新计
         s.last_pres_id = info.get("presId") or s.last_pres_id
+        # 先标记防止本轮 settle 期间重复进入; 下方所有失败路径必须撤销标记允许重试
         s.captured_sids.add(sid)
 
         # 短暂等待渲染稳定后重取候选; 期间已翻页则作废本次, 下轮循环抓当前页
@@ -1217,11 +1285,14 @@ class SlideCapture:
             s.captured_sids.discard(sid)
             return
         if info2 and info2.get("animated"):
+            s.captured_sids.discard(sid)
             return  # 等待期间出现动画层, 作废
         info = info2 or info
 
-        data, ext, via, url_used = self._fetch_image(info, s)
+        data, ext, via, url_used, retryable = self._fetch_image(info, s)
         if data is None:
+            if retryable:
+                s.captured_sids.discard(sid)   # 失败可重试, 下轮再试这一页
             return
         content_hash = hashlib.sha1(data).hexdigest()
         s.seen_hashes.add(content_hash)
@@ -1230,6 +1301,8 @@ class SlideCapture:
         emit_log(f"第 {s.index + 1} 张: {via}")
         path, fname = s.save_slide(data, ext, page=info.get("page"),
                                    pres_switch=pres_switch)
+        # 页面记录先落盘: 立即导出/异常退出时 cache-list 也能发现这张图
+        s.flush_meta()
         self._start_ocr(s, path, fname, content_hash)
         if pres_switch:
             emit_log("检测到课件切换")
@@ -1241,22 +1314,22 @@ class SlideCapture:
 
     def _fetch_image(self, info, s):
         """按候选顺序下载原图; 全部失败/重复时转课件区域裁剪截图。
-        返回 (data, ext, via, url_used) 或 (None,)*4"""
+        返回 (data, ext, via, url_used, retryable)——retryable 表示失败可下轮重试"""
         referer = self.driver.current_url
         for url in (info.get("candidates") or [])[:SLIDE_MAX_CANDIDATES]:
             if url == s.last_img_url:
                 continue   # 上一张用过的地址不重复抓
             d2, e2 = download_image(self.driver, url, referer)
             if d2 and hashlib.sha1(d2).hexdigest() not in s.seen_hashes:
-                return d2, e2, "原图下载", url
+                return d2, e2, "原图下载", url, False
         shot = self._shot_bytes(s)
         if shot is None:
             emit_log(f"第 {s.index + 1} 张: 截图失败，跳过")
-            return None, None, None, None
+            return None, None, None, None, True   # 截图失败是临时性的, 允许重试
         if hashlib.sha1(shot).hexdigest() in s.seen_hashes:
             emit_log(f"第 {s.index + 1} 张: 画面与已抓内容相同，跳过")
-            return None, None, None, None
-        return shot, "png", "页面截图", None
+            return None, None, None, None, False  # 内容重复, 不重试
+        return shot, "png", "页面截图", None, False
 
     def _shot_bytes(self, s):
         """页面截图, 裁到课件区域(去掉侧边栏/弹幕); 取不到容器时全屏"""
@@ -1466,6 +1539,7 @@ def run_listen(scan_default=False):
                 time.sleep(3)
                 try:
                     driver = get_driver(cfg, headless=False)
+                    capture.driver = driver   # 扫描仍持有旧连接, 必须同步替换
                     driver.get(f"{base_url}/v2/web/index")
                     time.sleep(2)
                     emit_log("已重连，继续监听")
@@ -1668,7 +1742,18 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
         if enable_mm:
             question_content = question_content or "题面见图片，请读取题目与选项作答"
 
-    ans = call_solver(cfg, question_content, q_type, options, image_path=shot)
+    try:
+        ans = call_solver(cfg, question_content, q_type, options, image_path=shot)
+    except SolverUnavailable as e:
+        emit_log(f"本题未作答: {e}")
+        return {
+            "event": "question",
+            "time": t_stamp,
+            "qtype": q_type,
+            "question": question_content[:120],
+            "answer": "（未作答）",
+            "submit": f"未作答: {e}",
+        }
 
     submit_desc = "未自动提交"
     try:
@@ -1702,11 +1787,11 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
 def detect_chapters(cfg, pages):
     """用文本模型划分章节, 并顺手清洗每页 OCR 文本(去图片标记/界面残留/重复页眉)。
     pages: [{index,page,ocr,pres_switch}], 清洗结果直接写回 p["ocr"] 并随 slides.json 持久化"""
-    api_base = cfg.get("api_base", "").rstrip("/")
+    api_base = cfg.get("api_base", DEFAULT_CONFIG["api_base"]).rstrip("/")
     api_key = cfg.get("api_key", "")
-    model = (cfg.get("models") or [""])[0]
-    if not api_key or not api_base or not model:
-        emit_log("模型 API 未配置，全部页面合并为一个文件，文本不清洗")
+    model = (cfg.get("models") or DEFAULT_CONFIG["models"])[0]
+    if not api_key:
+        emit_log("未配置模型 API Key，全部页面合并为一个文件，文本不清洗")
         return None
 
     parts = []
@@ -1753,21 +1838,23 @@ chapters 的 pages 用页序号，按顺序覆盖全部 {len(pages)} 页，不�
             emit_log(f"已清洗 {n_clean}/{len(pages)} 页文本（去图片标记与重复标题）")
 
         chapters = data.get("chapters") or []
+        # 动画页剔除后 index 可能不连续, 校验集合必须用真实页序号
+        real_indexes = {p["index"] for p in pages}
         valid = []
         seen = set()
         for ch in chapters:
             pgs = [x for x in (ch.get("pages") or [])
-                   if isinstance(x, int) and 1 <= x <= len(pages) and x not in seen]
+                   if isinstance(x, int) and x in real_indexes and x not in seen]
             if pgs:
                 for x in pgs:
                     seen.add(x)
                 valid.append({"title": sanitize_filename(ch.get("title") or f"第{len(valid)+1}部分", 24),
                               "pages": sorted(pgs)})
-        if not valid or len(seen) < len(pages) // 2:
+        if not valid or len(seen) < len(real_indexes) // 2:
             emit_log("章节划分结果不完整，按单一文件处理")
             return None
         # 未覆盖的页并入最后一章
-        missing = [i for i in range(1, len(pages) + 1) if i not in seen]
+        missing = sorted(real_indexes - seen)
         if missing and valid:
             valid[-1]["pages"].extend(missing)
             valid[-1]["pages"].sort()
@@ -1816,6 +1903,12 @@ def run_merge(session_dir):
         by_index = {p["index"]: p for p in pages}
         for ch in chapters:
             base_name = f"{date}-{course}-{ch['title']}"
+            # 不覆盖历史: 同名存在时追加批次序号
+            seq = 1
+            while os.path.exists(os.path.join(out_dir, base_name + ("" if seq == 1 else f"-第{seq}次") + ".pdf")):
+                seq += 1
+            if seq > 1:
+                base_name += f"-第{seq}次"
             pdf_path = os.path.join(out_dir, base_name + ".pdf")
             txt_path = os.path.join(out_dir, base_name + "-文本.txt")
 
@@ -1851,6 +1944,19 @@ def run_merge(session_dir):
                 removed += 1
             except Exception:
                 pass
+        # 写回前重读磁盘: 监听可能在导出期间新增了页面, 直接覆盖会丢页
+        # 合并策略: 以磁盘最新列表为准, 同名文件用内存版本(含 AI 清洗后的文本)
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                disk_meta = json.load(f)
+            by_file = {p.get("file"): p for p in meta.get("pages", [])}
+            merged = [by_file.get(p.get("file"), p)
+                      for p in disk_meta.get("pages", [])]
+            merged += [p for p in meta.get("pages", [])
+                       if p.get("file") not in {q.get("file") for q in merged}]
+            meta["pages"] = merged
+        except Exception:
+            pass
         meta["pages"] = [p for p in meta.get("pages", [])
                          if os.path.exists(os.path.join(session_dir, p["file"]))]
         try:

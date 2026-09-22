@@ -33,6 +33,27 @@
 3. 开「监听」自动答题，「扫描课件」按需开启
 4. 下课点「导出课件」，按章节生成 PDF 和文本
 
+## 服务申请与填写
+
+需要三样 Key，前两样免费，只有 DeepSeek 需要充值：
+
+**① DeepSeek —— 答题用（需充值）**
+1. 注册登录 [platform.deepseek.com](https://platform.deepseek.com/usage)，左侧「API keys」创建 Key（`sk-` 开头）
+2. 充值在 [usage 页](https://platform.deepseek.com/usage)，按量计费；答题一次只发一张图，几块钱够用很久
+3. 设置里填：模型接口地址 `https://api.deepseek.com/v1`、API Key、模型名 `deepseek-chat`（以控制台模型列表为准）
+
+**② PaddleOCR —— 课件识别首选（免费）**
+1. 打开 [aistudio.baidu.com/paddleocr](https://aistudio.baidu.com/paddleocr)，登录后创建应用/获取访问令牌
+2. 免费额度每天 2 万页，个人使用绰绰有余
+3. 设置里填：课件识别首选 地址 `https://paddleocr.aistudio-app.com`、Key、模型 `PaddleOCR-VL-1.6`（新模型名以 PaddleOCR 官网为准）
+
+**③ 智谱 —— 课件识别备用（免费）**
+1. 打开 [bigmodel.cn/apikey/platform](https://bigmodel.cn/apikey/platform)，注册后创建 API Key（两段式 `xxxx.yyyy`）
+2. 免费的视觉模型就是备用识别用的；模型名在「模型广场」可查（当前如 `glm-4v-flash`）
+3. 设置里填：课件识别备用 地址 `https://open.bigmodel.cn/api/paas/v4`、Key、模型 `glm-4v-flash`
+
+> 只用自动答题的话，只填 ① 即可；课件扫描的文字识别建议 ②③ 都填上，首选失败自动切备用。
+
 ## 配置
 
 配置文件在 `~/.yuketang-helper/config.json`（Windows 为 `%USERPROFILE%\.yuketang-helper\config.json`），界面上改的是同一份：

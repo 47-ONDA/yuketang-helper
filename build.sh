@@ -52,8 +52,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>雨课堂助手</string>
     <key>CFBundleDisplayName</key><string>雨课堂助手</string>
     <key>CFBundleIdentifier</key><string>cn.robbanks.yuketang-helper</string>
-    <key>CFBundleVersion</key><string>1.1.0</string>
-    <key>CFBundleShortVersionString</key><string>1.1.0</string>
+    <key>CFBundleVersion</key><string>1.1.1</string>
+    <key>CFBundleShortVersionString</key><string>1.1.1</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>ykt-helper</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>

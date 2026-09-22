@@ -46,11 +46,16 @@ Copy-Item "dist\engine.exe" "dist\ykt-helper-gui\engine.exe" -Force
 Write-Host "[5/5] Inno Setup 安装包 ..."
 # 中文语言文件: 官方仓库 main 分支 Files/Languages/ 下; 缺了补, 补不到退回英文界面
 $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
+Remove-Item "packaging\installer.no-zh.iss" -ErrorAction SilentlyContinue
 if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
     Write-Host "  ChineseSimplified.isl 缺失, 从官方仓库下载..."
     New-Item -ItemType Directory -Force -Path $langDir | Out-Null
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" `
-        -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
+    try {
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" `
+            -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
+    } catch {
+        Write-Host "  下载失败: $($_.Exception.Message)"
+    }
 }
 if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
     Write-Host "  下载失败, 安装器界面退回英文"
