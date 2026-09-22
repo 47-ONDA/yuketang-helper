@@ -48,7 +48,7 @@
 ## 常见问题
 
 - **Mac 提示已损坏** → `xattr -cr /Applications/雨课堂助手.app`
-- **Win 浏览器打不开** → 查看 `~/.yuketang-helper/engine.log`：多为 chromedriver 与 Chrome 大版本不一致，从 [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) 下载对应版本替换后重装
+- **Win 浏览器打不开** → 程序会自动下载与 Chrome 匹配的驱动（需联网）；仍失败时查看 `~/.yuketang-helper/engine.log`，多为网络问题或杀毒软件拦截
 - **只有 Edge 没有 Chrome** → 需自行放置 msedgedriver，或安装 Chrome
 
 ## 源码运行

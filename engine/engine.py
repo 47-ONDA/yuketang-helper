@@ -36,6 +36,7 @@ import argparse
 import threading
 import subprocess
 import base64
+import platform
 
 import requests
 from selenium import webdriver
@@ -231,12 +232,205 @@ def resolve_driver_path(browser="chrome"):
     p = os.environ.get("YKT_DRIVER")
     if p and os.path.exists(p):
         return p
+    p = bundled_driver_path(browser)
+    return p if p and os.path.exists(p) else None
+
+
+def bundled_driver_path(browser="chrome"):
     if browser == "edge":
         name = "msedgedriver.exe" if IS_WINDOWS else "msedgedriver"
     else:
         name = "chromedriver.exe" if IS_WINDOWS else "chromedriver"
-    p = os.path.join(ENGINE_DIR, name)
-    return p if os.path.exists(p) else None
+    return os.path.join(ENGINE_DIR, name)
+
+
+DRIVER_CACHE_DIR = os.path.join(RUNTIME_DIR, "drivers")
+CHROMETESTING_MIRROR = "https://registry.npmmirror.com/-/binary/chrome-for-testing"
+CHROMETESTING_OFFICIAL = "https://googlechromelabs.github.io/chrome-for-testing"
+
+
+def _driver_platform():
+    if IS_WINDOWS:
+        return "win64"
+    if IS_MAC:
+        return "mac-arm64" if platform.machine() == "arm64" else "mac-x64"
+    return "linux64"
+
+
+def _driver_exe_name(browser="chrome"):
+    base = "msedgedriver" if browser == "edge" else "chromedriver"
+    return base + (".exe" if IS_WINDOWS else "")
+
+
+def _detect_browser_version(browser="chrome"):
+    """读已安装浏览器的完整版本号, 读不到返回 None"""
+    try:
+        if IS_MAC:
+            import plistlib
+            if browser == "edge":
+                plist = "/Applications/Microsoft Edge.app/Contents/Info.plist"
+            else:
+                plist = "/Applications/Google Chrome.app/Contents/Info.plist"
+            if os.path.exists(plist):
+                with open(plist, "rb") as f:
+                    return (plistlib.load(f) or {}).get("CFBundleShortVersionString")
+            return None
+        if IS_WINDOWS:
+            import winreg
+            vendor = "Microsoft" if browser == "edge" else "Google"
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                try:
+                    with winreg.OpenKey(root, f"Software\\{vendor}\\{browser.capitalize()}\\BLBeacon") as k:
+                        val, _ = winreg.QueryValueEx(k, "version")
+                        return val
+                except OSError:
+                    continue
+            return None
+        # linux
+        exe = "/usr/bin/microsoft-edge" if browser == "edge" else "/usr/bin/google-chrome"
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10)
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)", out.stdout or "")
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _pick_version_for_milestone(versions, major):
+    """从版本号列表里挑出该大版本下最新的一个"""
+    cands = [v for v in versions if v.split(".")[0] == str(major)]
+    if not cands:
+        return None
+    return max(cands, key=lambda v: [int(x) for x in v.split(".")])
+
+
+def _download_driver(major, browser="chrome"):
+    """下载与大版本匹配的驱动到缓存目录, 返回可执行文件路径; 失败返回 None"""
+    if browser == "edge":
+        return None   # Edge 走手动配置, 不做自动下载
+    plat = _driver_platform()
+    exe_name = _driver_exe_name()
+    dest_dir = os.path.join(DRIVER_CACHE_DIR, f"chrome-{major}")
+    exe_path = os.path.join(dest_dir, exe_name)
+    if os.path.exists(exe_path) and os.path.getsize(exe_path) > 1024 * 1024:
+        return exe_path
+    try:
+        os.remove(exe_path)
+    except Exception:
+        pass
+    full = None
+    zip_url = None
+    # 源一: npmmirror 国内镜像, 列目录找该大版本最新
+    try:
+        r = requests.get(f"{CHROMETESTING_MIRROR}/", timeout=15)
+        names = [item.get("name", "").rstrip("/")
+                 for item in r.json() if isinstance(item, dict)]
+        names = [n for n in names if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", n)]
+        full = _pick_version_for_milestone(names, major)
+        if full:
+            # npmmirror 镜像比官方桶多一层平台子目录
+            zip_url = f"{CHROMETESTING_MIRROR}/{full}/{plat}/chromedriver-{plat}.zip"
+    except Exception:
+        pass
+    # 源二: 官方 known-good-versions
+    if not zip_url:
+        try:
+            r = requests.get(f"{CHROMETESTING_OFFICIAL}/known-good-versions-with-downloads.json", timeout=20)
+            vs = [v["version"] for v in r.json().get("versions", [])
+                  if v.get("version", "").split(".")[0] == str(major)
+                  and any(d.get("platform") == plat for d in v.get("downloads", {}).get("chromedriver", []))]
+            full = _pick_version_for_milestone(vs, major)
+            if full:
+                for v in r.json().get("versions", []):
+                    if v.get("version") == full:
+                        for d in v["downloads"]["chromedriver"]:
+                            if d.get("platform") == plat:
+                                zip_url = d["url"]
+        except Exception:
+            pass
+    if not zip_url:
+        return None
+    os.makedirs(dest_dir, exist_ok=True)
+    zpath = os.path.join(dest_dir, "driver.zip")
+    try:
+        r = requests.get(zip_url, timeout=120, stream=True)
+        r.raise_for_status()
+        with open(zpath, "wb") as f:
+            for chunk in r.iter_content(65536):
+                f.write(chunk)
+        import zipfile
+        with zipfile.ZipFile(zpath) as z:
+            for info in z.namelist():
+                # 精确匹配文件名, 避免 LICENSE.chromedriver 这类同名尾缀文件抢先
+                if os.path.basename(info) == exe_name:
+                    with z.open(info) as src, open(exe_path, "wb") as dst:
+                        dst.write(src.read())
+                    break
+        if not IS_WINDOWS:
+            os.chmod(exe_path, 0o755)
+        emit_log(f"已自动下载 {browser} 驱动 {full}")
+        return exe_path if os.path.exists(exe_path) else None
+    except Exception as e:
+        emit_log(f"自动下载驱动失败: {str(e)[:100]}")
+        return None
+    finally:
+        try:
+            os.remove(zpath)
+        except Exception:
+            pass
+
+
+def pick_driver(browser="chrome"):
+    """驱动选择策略: 内置驱动版本匹配 → 直接用;
+    不匹配 → 缓存/自动下载匹配版; 全失败 → 退回内置驱动并警告。
+    返回 (驱动路径, 是否版本匹配)"""
+    env = os.environ.get("YKT_DRIVER")
+    if env and os.path.exists(env):
+        return env, True
+    bundled = bundled_driver_path(browser)
+    bundled_ok = bundled and os.path.exists(bundled)
+    if browser == "edge":
+        return (bundled, True) if bundled_ok else (None, False)
+    browser_ver = _detect_browser_version("chrome")
+    want_major = browser_ver.split(".")[0] if browser_ver else None
+    bundled_ver = _detect_driver_version(bundled) if bundled_ok else None
+    if want_major and bundled_ver and want_major == bundled_ver.split(".")[0]:
+        return bundled, True
+    # 需要匹配: 先查缓存, 再下载
+    cached = _cached_driver_for(want_major) if want_major else None
+    if cached:
+        return cached, True
+    if want_major:
+        dl = _download_driver(want_major)
+        if dl:
+            return dl, True
+    if bundled_ok:
+        emit_log(f"警告: 内置驱动 {bundled_ver or '?'} 与 Chrome {browser_ver or '?'} 大版本不一致, 尝试直接使用")
+        return bundled, False
+    return None, False
+
+
+def _detect_driver_version(path):
+    try:
+        out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)", out.stdout or "")
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _cached_driver_for(major):
+    if not major:
+        return None
+    exe_name = _driver_exe_name()
+    try:
+        for d in sorted(glob.glob(os.path.join(DRIVER_CACHE_DIR, f"chrome-*")), reverse=True):
+            if d.split("chrome-")[-1].split("-")[0] == str(major):
+                p = os.path.join(d, exe_name)
+                if os.path.exists(p):
+                    return p
+    except Exception:
+        pass
+    return None
 
 
 def get_driver(cfg, headless=False):
@@ -290,11 +484,13 @@ def _launch_browser(cfg, headless):
     if headless:
         opts.add_argument("--headless=new")
 
-    drv = resolve_driver_path(name)
+    drv, matched = pick_driver(name)
     if not drv:
         if name == "edge":
             raise RuntimeError("未找到 Edge 驱动 (msedgedriver)，且未检测到 Chrome——请安装 Chrome 后重试")
-        raise RuntimeError("未找到 chromedriver，请确认打包完整或重新下载")
+        raise RuntimeError("未找到 chromedriver，请确认打包完整或重试（程序会自动下载匹配版本，需联网）")
+    if not matched:
+        emit_log("驱动与 Chrome 版本不一致且自动下载失败，尝试用现有驱动继续；若报错请检查网络后重启程序")
     service = Service(executable_path=drv)
     return driver_cls(options=opts, service=service)
 
