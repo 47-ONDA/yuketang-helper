@@ -4,6 +4,8 @@ $ErrorActionPreference = "Stop"
 $CD_VERSION = "153.0.8010.50"
 Start-Transcript -Path "build-log.txt" -Force
 
+try {
+
 Write-Host "[1/5] 下载 chromedriver win64 $CD_VERSION ..."
 $ok = $false
 foreach ($url in @(
@@ -47,3 +49,11 @@ if ($LASTEXITCODE -ne 0) { throw "ISCC 失败" }
 
 Stop-Transcript
 Write-Host "完成: dist\ykt-helper-gui\ 与 dist\installer\"
+
+} catch {
+    # 失败时把日志尾部打成分步注解(CI 无日志权限时也能看到原因)
+    Stop-Transcript -ErrorAction SilentlyContinue
+    $tail = Get-Content "build-log.txt" -Tail 30 -ErrorAction SilentlyContinue
+    foreach ($line in $tail) { Write-Host "::error::$line" }
+    exit 1
+}

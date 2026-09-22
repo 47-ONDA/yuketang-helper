@@ -13,6 +13,8 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +35,16 @@ jobs:
         with:
           name: build-log
           path: build-log.txt
+
+      - name: 提交构建日志到 ci-log 分支
+        if: always()
+        shell: bash
+        run: |
+          git config user.email "ci@example.com"
+          git config user.name "ci-log-bot"
+          git add build-log.txt || exit 0
+          git commit -m "CI 构建日志 $(git rev-parse --short HEAD)" || exit 0
+          git push -f origin "HEAD:refs/heads/ci-log" || exit 0
 
       - name: 上传绿色目录
         uses: actions/upload-artifact@v4
