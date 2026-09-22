@@ -748,9 +748,10 @@ class SlideSession:
 
 
 def is_animation_notice(text):
-    """OCR 出来的文本是否只是「当前页面有动画」提示层(雨课堂在动画页盖的覆盖层)"""
+    """OCR 出来的文本是否只是「当前页面有动画」提示层(雨课堂在动画页盖的覆盖层)。
+    精确匹配 UI 文案, 不做长度+关键词模糊判断, 避免误伤含「动画」的正常课件"""
     t = (text or "").replace("\n", "").replace(" ", "")
-    return 0 < len(t) < 30 and "动画" in t
+    return "当前页面有动画" in t or "请先听老师讲解" in t
 
 
 def download_image(driver, url, referer):
@@ -1494,7 +1495,10 @@ def run_merge(session_dir):
         # 只清理已导出的图片, 保留目录与 slides.json —— 监听可能仍在写入
         # (导出后继续扫描的新图落在同一目录, 下次导出按图片存在性只合并新页)
         removed = 0
-        for p in pages:
+        exported_names = {p["file"] for p in pages}
+        excluded = [p for p in meta.get("pages", [])
+                    if p.get("file") not in exported_names and is_animation_notice(p.get("ocr"))]
+        for p in pages + excluded:   # 被剔除的动画提示页文件一并删除
             try:
                 os.remove(os.path.join(session_dir, p["file"]))
                 removed += 1
