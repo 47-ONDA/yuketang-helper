@@ -1255,15 +1255,16 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
     submit_desc = "未自动提交"
     try:
         if "选" in q_type:
-            letters = [c for c in ans.upper() if 'A' <= c <= 'Z']
-            driver.execute_script("""
-                const letters = arguments[0];
-                // 优先: 题目面板的选项控件, 以字母标记开头(A / A. / A、/ A+空格)
-                const widgets = Array.from(document.querySelectorAll(
-                    '[class*="option"], [class*="choice"], [class*="answer-item"]'
-                )).filter(el => el.offsetWidth > 0 && typeof el.className === 'string'
-                    && !/page|nav|slide|thumb|tab|menu/i.test(el.className));
-                for (const ch of letters) {
+            # 逐个字母点: 每次点击后 Vue 会重渲染选项列表, 必须重新查询 DOM,
+            # 一次查好存数组再点的写法第二个选项起全是已脱离的旧元素, 点了无效
+            letters = list(dict.fromkeys(c for c in ans.upper() if 'A' <= c <= 'Z'))
+            for ch in letters:
+                driver.execute_script("""
+                    const ch = arguments[0];
+                    const widgets = Array.from(document.querySelectorAll(
+                        '[class*="option"], [class*="choice"], [class*="answer-item"]'
+                    )).filter(el => el.offsetWidth > 0 && typeof el.className === 'string'
+                        && !/page|nav|slide|thumb|tab|menu/i.test(el.className));
                     let hit = widgets.find(el => new RegExp('^' + ch + '([.、．\\\\s]|$)').test((el.textContent || '').trim()));
                     if (!hit) {
                         const allEls = Array.from(document.querySelectorAll('p, span, div, li'));
@@ -1273,9 +1274,22 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
                         hit.click();
                         if (hit.parentElement) hit.parentElement.click();
                     }
-                }
-            """, letters)
-            time.sleep(1)
+                """, ch)
+                time.sleep(0.15)
+            time.sleep(0.8)
+            try:
+                n_sel = driver.execute_script("""
+                    return Array.from(document.querySelectorAll(
+                        '[class*="option"], [class*="choice"], [class*="answer-item"]'
+                    )).filter(el => {
+                        const c = typeof el.className === 'string' ? el.className : '';
+                        return el.offsetWidth > 0 && /select|active|checked|chosen/i.test(c);
+                    }).length;
+                """) or 0
+                if n_sel:
+                    emit_log(f"已选中 {n_sel} 个选项")
+            except Exception:
+                pass
 
         if "填空" in q_type or "主观" in q_type:
             driver.execute_script("""
