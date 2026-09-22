@@ -40,8 +40,8 @@ Write-Host "  dist 内容:"
 Get-ChildItem -Recurse dist | Select-Object -ExpandProperty FullName
 
 Write-Host "[4/5] 合并产物 ..."
-if (-not (Test-Path "dist\engine\engine.exe")) { throw "engine.exe 未生成" }
-Copy-Item "dist\engine\engine.exe" "dist\ykt-helper-gui\engine.exe" -Force
+if (-not (Test-Path "dist\engine.exe")) { throw "engine.exe 未生成" }
+Copy-Item "dist\engine.exe" "dist\ykt-helper-gui\engine.exe" -Force
 
 Write-Host "[5/5] Inno Setup 安装包 ..."
 # Inno 6.3 之前不含官方中文语言文件, 缺了就从官方仓库补; 补不到则退回英文界面
