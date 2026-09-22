@@ -503,12 +503,9 @@ const currSlide = store ? store.currSlide : null;
 
 const vis = el => !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0));
 
-// 有未完成的题时跳到该时间点(与原版行为一致)
-const unfin = Array.from(document.querySelectorAll('.timeline__item.J_slide, .timeline__item'))
-    .find(el => el.innerText.includes('未完成'));
-if (unfin && !unfin.className.includes('active')) {
-    unfin.click();
-}
+// 报告「未完成」题的时间轴下标, 由 Python 侧限量跳转(截止的题永远是未完成, JS 内点击会无限跳回)
+const tItems = Array.from(document.querySelectorAll('.timeline__item.J_slide, .timeline__item'));
+info.unfinIndex = tItems.findIndex(el => el.innerText.includes('未完成'));
 
 // ---- 证据收集 ----
 // 1) 选项控件: 题目面板里可点击的选项容器(class 含 option/choice 等), 不收正文里的裸字母文本
@@ -937,6 +934,7 @@ def run_listen(scan_default=False):
         emit_log("课件扫描已开启 (--scan)")
     prevent_system_sleep()
     answered = set()
+    jumped_unfin = set()   # 已自动跳转过的「未完成」题, 每题只跳一次(截止题会永远未完成)
 
     def handle_slide():
         """课件翻页检测与抓取, 在监听线程内同步执行; 任何异常只记日志不冒泡"""
@@ -1135,6 +1133,23 @@ def run_listen(scan_default=False):
                         continue
 
                 quiz_info = driver.execute_script(QUIZ_PROBE_JS)
+
+                # 「未完成」题限量跳转: 每题只自动跳一次去作答;
+                # 截止的题会永远停在未完成, 无限量跳会不停把页面拽回去
+                ui = (quiz_info or {}).get("unfinIndex", -1)
+                if isinstance(ui, int) and 0 <= ui and ui not in jumped_unfin:
+                    jumped_unfin.add(ui)
+                    emit_log("检测到未作答的题，跳转过去")
+                    try:
+                        driver.execute_script("""
+                            const i = arguments[0];
+                            const items = document.querySelectorAll('.timeline__item.J_slide, .timeline__item');
+                            if (items[i]) { items[i].click(); }
+                        """, ui)
+                        time.sleep(2)
+                        continue
+                    except Exception:
+                        pass
 
                 if quiz_info and quiz_info.get("hasQuiz"):
                     prob_id = quiz_info.get("probId")
@@ -1368,43 +1383,58 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
 # ---------------------------------------------------------------------------
 
 def detect_chapters(cfg, pages):
-    """用文本模型把页面划分为章节。pages: [{index,page,ocr,pres_switch}]"""
+    """用文本模型划分章节, 并顺手清洗每页 OCR 文本(去图片标记/界面残留/重复页眉)。
+    pages: [{index,page,ocr,pres_switch}], 清洗结果直接写回 p["ocr"] 并随 slides.json 持久化"""
     api_base = cfg.get("api_base", "").rstrip("/")
     api_key = cfg.get("api_key", "")
     model = (cfg.get("models") or [""])[0]
     if not api_key or not api_base or not model:
-        emit_log("模型 API 未配置，全部页面合并为一个文件")
+        emit_log("模型 API 未配置，全部页面合并为一个文件，文本不清洗")
         return None
 
-    lines = []
+    parts = []
     for p in pages:
-        mark = "switch" if p.get("pres_switch") else "-"
-        head = (p.get("ocr") or "").replace("\n", " ")[:120]
-        lines.append(f"{p['index']}|{mark}|{head}")
-    listing = "\n".join(lines)
+        mark = "|课件切换" if p.get("pres_switch") else ""
+        parts.append(f"【第{p['index']}页{mark}】\n{(p.get('ocr') or '').strip()}")
+    listing = "\n\n".join(parts)
 
-    prompt = f"""你是课件整理助手。下面是一次课的课件页面清单，每行格式为「页序号|课件切换标记|该页文字开头」。
+    prompt = f"""你是课件整理助手。下面是一次课每页课件的 OCR 文本，请完成两件事。
 
-请把页面划分为章节并输出。判定规则：
+一、清理每页文本（目标是 txt 阅读体验，不改内容只去噪音）：
+1. 删除所有图片标记（如 <div...><img src="imgs/...">...</div>、![](...)、空段落）；
+2. 删除课堂界面残留：课堂动态、正在放映、已签到、收藏、不懂、发送、说点什么、50/50、弹幕、「N 分钟前」「N 秒前」、第N页 等；
+3. 每页重复出现的标题文字（课程名、章节名、学校院系名、教师姓名邮箱等页眉页脚）只保留第一次出现，后续页删除；
+4. 正文、表格、公式原样保留，不要改写、不要总结、不要增删。
+
+二、划分章节。判定规则：
 1. 出现新的章号（如从「第4章」变为「第5章」）即开始新章节；
 2. 某页开头出现明显的一行独立大字标题（与上一页内容主题明显不同）也视为新章节；
-3. 标记为 switch 的行表示老师切换了课件文件，可作为参考；
-4. 每章标题取该章起始页的标题文字，20 字以内，去掉页码序号；
-5. 若整份课件没有明显章节划分，输出单一章节，标题用课件主题或「课件」。
+3. 标注「课件切换」的页是老师换了课件文件，可作参考；
+4. 每章标题取该章起始页的标题文字，20 字以内；没有明显章节时输出单一章节，标题用课件主题或「课件」。
 
 严格输出 JSON（不要输出任何其他内容）：
-{{"chapters":[{{"title":"第1章 函数与极限","pages":[1,2,3]}},{{"title":"...","pages":[4,5]}}]}}
-pages 使用页序号，必须按顺序覆盖全部 {len(pages)} 页，不遗漏不重复。
+{{"chapters":[{{"title":"第1章 函数与极限","pages":[1,2,3]}}],"cleaned":{{"1":"该页清理后的文本","2":"..."}}}}
+chapters 的 pages 用页序号，按顺序覆盖全部 {len(pages)} 页，不遗漏不重复；cleaned 的键是页序号字符串。
 
-清单：
 {listing}"""
 
     try:
         out = _chat(api_base, api_key, model,
                     [{"role": "user", "content": prompt}],
-                    timeout=30, max_tokens=1500, temperature=0.1)
+                    timeout=60, max_tokens=8000, temperature=0.1)
         m = re.search(r'\{.*\}', out, re.S)
         data = json.loads(m.group(0))
+
+        cleaned = data.get("cleaned") or {}
+        n_clean = 0
+        for p in pages:
+            t = cleaned.get(str(p["index"]))
+            if isinstance(t, str) and len(t.strip()) >= 5:
+                p["ocr"] = t.strip()
+                n_clean += 1
+        if n_clean:
+            emit_log(f"已清洗 {n_clean}/{len(pages)} 页文本（去图片标记与重复标题）")
+
         chapters = data.get("chapters") or []
         valid = []
         seen = set()
