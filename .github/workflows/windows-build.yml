@@ -29,6 +29,14 @@ jobs:
         shell: pwsh
         run: ./packaging/build-windows.ps1
 
+      - name: 启动冒烟测试 (exe 必须能跑起来)
+        shell: pwsh
+        run: |
+          $out = & "dist\engine\engine.exe" cache-list
+          $out | ForEach-Object { Write-Host "  $_" }
+          if ($LASTEXITCODE -ne 0) { throw "engine.exe 启动失败 (exit $LASTEXITCODE)" }
+          if (-not ($out -join "" -match "sessions")) { throw "engine.exe 输出异常" }
+
       - name: 上传构建日志 (失败排障)
         if: always()
         uses: actions/upload-artifact@v4
