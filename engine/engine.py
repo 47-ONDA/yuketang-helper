@@ -89,15 +89,15 @@ BROWSER_APPS = _default_browser_paths()
 DEFAULT_CONFIG = {
     "yuketang_base_url": "https://changjiang.yuketang.cn",
     "browser": "chrome",
-    "api_base": "https://api.deepseek.com/v1",
+    "api_base": "",
     "api_key": "",
-    "models": ["deepseek-flash"],
+    "models": [],
     "enable_multimodal": True,
-    "multimodal_models": ["deepseek-flash"],
+    "multimodal_models": [],
     "auto_submit": True,
     "listen_interval": 1.0,
-    "ocr_primary": {"api_base": "https://paddleocr.aistudio-app.com", "api_key": "", "model": "PaddleOCR-VL-1.6"},
-    "ocr_backup": {"api_base": "https://open.bigmodel.cn/api/paas/v4", "api_key": "", "model": "glm-4v-flash"},
+    "ocr_primary": {"api_base": "", "api_key": "", "model": ""},
+    "ocr_backup": {"api_base": "", "api_key": "", "model": ""},
     "slide_dir": "~/Documents/雨课堂课件",
 }
 
@@ -585,13 +585,13 @@ class SolverUnavailable(RuntimeError):
 
 
 def call_solver(cfg, question_text, q_type, options=None, image_path=None):
-    api_base = cfg.get("api_base", DEFAULT_CONFIG["api_base"]).rstrip("/")
+    api_base = cfg.get("api_base", "").rstrip("/")
     api_key = cfg.get("api_key", "")
-    models_pool = list(cfg.get("models", DEFAULT_CONFIG["models"]))
+    models_pool = list(cfg.get("models", []))
     enable_mm = cfg.get("enable_multimodal", True)
-    mm_models = list(cfg.get("multimodal_models", DEFAULT_CONFIG["multimodal_models"]))
+    mm_models = list(cfg.get("multimodal_models", []))
 
-    if not api_key or api_key == "YOUR_API_KEY_HERE":
+    if not api_key or api_key == "YOUR_API_KEY_HERE" or not api_base or not models_pool:
         raise SolverUnavailable("模型 API 未配置，无法作答（请在设置中填写）")
 
     opt_str = f"\n可选选项: {', '.join(options)}" if options else ""
@@ -1787,11 +1787,11 @@ def handle_quiz(driver, cfg, quiz_info, auto_submit, enable_mm):
 def detect_chapters(cfg, pages):
     """用文本模型划分章节, 并顺手清洗每页 OCR 文本(去图片标记/界面残留/重复页眉)。
     pages: [{index,page,ocr,pres_switch}], 清洗结果直接写回 p["ocr"] 并随 slides.json 持久化"""
-    api_base = cfg.get("api_base", DEFAULT_CONFIG["api_base"]).rstrip("/")
+    api_base = cfg.get("api_base", "").rstrip("/")
     api_key = cfg.get("api_key", "")
-    model = (cfg.get("models") or DEFAULT_CONFIG["models"])[0]
-    if not api_key:
-        emit_log("未配置模型 API Key，全部页面合并为一个文件，文本不清洗")
+    model = (cfg.get("models") or [""])[0]
+    if not api_key or not api_base or not model:
+        emit_log("模型 API 未配置，全部页面合并为一个文件，文本不清洗")
         return None
 
     parts = []
