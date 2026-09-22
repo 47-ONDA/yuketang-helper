@@ -226,11 +226,15 @@ def detect_browser(pref):
     return None
 
 
-def resolve_driver_path():
+def resolve_driver_path(browser="chrome"):
+    """按浏览器取驱动: Chrome 用 chromedriver, Edge 用 msedgedriver (Windows 带 .exe 后缀)"""
     p = os.environ.get("YKT_DRIVER")
     if p and os.path.exists(p):
         return p
-    name = "chromedriver.exe" if IS_WINDOWS else "chromedriver"
+    if browser == "edge":
+        name = "msedgedriver.exe" if IS_WINDOWS else "msedgedriver"
+    else:
+        name = "chromedriver.exe" if IS_WINDOWS else "chromedriver"
     p = os.path.join(ENGINE_DIR, name)
     return p if os.path.exists(p) else None
 
@@ -286,11 +290,13 @@ def _launch_browser(cfg, headless):
     if headless:
         opts.add_argument("--headless=new")
 
-    drv = resolve_driver_path()
-    service = Service(executable_path=drv) if drv else None
-    if service:
-        return driver_cls(options=opts, service=service)
-    return driver_cls(options=opts)
+    drv = resolve_driver_path(name)
+    if not drv:
+        if name == "edge":
+            raise RuntimeError("未找到 Edge 驱动 (msedgedriver)，且未检测到 Chrome——请安装 Chrome 后重试")
+        raise RuntimeError("未找到 chromedriver，请确认打包完整或重新下载")
+    service = Service(executable_path=drv)
+    return driver_cls(options=opts, service=service)
 
 
 # ---------------------------------------------------------------------------

@@ -67,7 +67,11 @@ class EngineProcess:
 
     def _read_loop(self):
         try:
-            for raw in self.proc.stdout:
+            # readline 逐行读取; for-line 迭代有缓冲预读, 事件会攒批延迟到达
+            while True:
+                raw = self.proc.stdout.readline()
+                if not raw:
+                    break
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line.startswith("{"):
                     continue

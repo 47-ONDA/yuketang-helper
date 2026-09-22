@@ -8,7 +8,7 @@
 |---|---|---|
 | 界面 | SwiftUI 原生应用 | tkinter 界面（功能一致，形态更简单） |
 | 分发 | `.app`（Intel + Apple Silicon 双架构） | 安装包 `.exe` / 绿色目录 zip（PyInstaller 打包，无需装 Python） |
-| 浏览器 | Chrome | Chrome 或 Edge（Win10/11 自带 Edge 可直接用） |
+| 浏览器 | Chrome | Chrome（必装；Edge 需自行配置 msedgedriver） |
 
 ## 致谢与许可
 
@@ -51,7 +51,7 @@
 1. **安装包**：下载 `yuketang-helper-*-windows-setup.exe`，双击安装，开始菜单启动
 2. **绿色目录**：下载 `yuketang-helper-windows.zip`，解压后直接运行 `ykt-helper-gui.exe`
 
-- 需要 Windows 10/11；无需安装 Python
+- 需要 Windows 10/11 与 Google Chrome；无需安装 Python
 - 首次运行若被 SmartScreen 拦截：点「更多信息」→「仍要运行」（应用无付费签名）
 - 首次打开「设置」填入模型 API 与课件识别 Key
 

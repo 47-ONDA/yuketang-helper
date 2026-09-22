@@ -44,25 +44,19 @@ if (-not (Test-Path "dist\engine.exe")) { throw "engine.exe 未生成" }
 Copy-Item "dist\engine.exe" "dist\ykt-helper-gui\engine.exe" -Force
 
 Write-Host "[5/5] Inno Setup 安装包 ..."
-# Inno 6.3 之前不含官方中文语言文件, 缺了就从官方仓库补; 补不到则退回英文界面
+# 中文语言文件: 官方仓库 main 分支 Files/Languages/ 下; 缺了补, 补不到退回英文界面
 $langDir = "C:\Program Files (x86)\Inno Setup 6\Languages"
 if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
-    Write-Host "  ChineseSimplified.isl 缺失, 尝试从官方仓库下载..."
+    Write-Host "  ChineseSimplified.isl 缺失, 从官方仓库下载..."
     New-Item -ItemType Directory -Force -Path $langDir | Out-Null
-    foreach ($u in @(
-        "https://raw.githubusercontent.com/jrsoftware/issrc/master/Files/Languages/Unofficial/ChineseSimplified.isl",
-        "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl")) {
-        try {
-            Invoke-WebRequest -Uri $u -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
-            break
-        } catch { Write-Host "  源失败: $u" }
-    }
+    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" `
+        -OutFile "$langDir\ChineseSimplified.isl" -TimeoutSec 60
 }
 if (-not (Test-Path "$langDir\ChineseSimplified.isl")) {
     Write-Host "  下载失败, 安装器界面退回英文"
     (Get-Content "packaging\installer.iss") |
         Where-Object { $_ -notmatch 'Languages|ChineseSimplified' } |
-        Set-Content "packaging\installer.no-zh.iss"
+        Set-Content "packaging\installer.no-zh.iss" -Encoding utf8BOM
 }
 $issFile = if (Test-Path "packaging\installer.no-zh.iss") { "packaging\installer.no-zh.iss" } else { "packaging\installer.iss" }
 $isccPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
