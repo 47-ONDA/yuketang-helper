@@ -32,10 +32,11 @@ jobs:
       - name: 启动冒烟测试 (exe 必须能跑起来)
         shell: pwsh
         run: |
-          $out = & "dist\engine\engine.exe" cache-list
-          $out | ForEach-Object { Write-Host "  $_" }
-          if ($LASTEXITCODE -ne 0) { throw "engine.exe 启动失败 (exit $LASTEXITCODE)" }
-          if (-not ($out -join "" -match "sessions")) { throw "engine.exe 输出异常" }
+          $out = (& "dist\engine\engine.exe" cache-list 2>&1 | Out-String).Trim()
+          Write-Host $out
+          $out | Set-Content smoke-output.txt
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::engine.exe exit $LASTEXITCODE`n$out"; exit 1 }
+          if (-not ($out -match "sessions")) { Write-Host "::error::engine.exe 输出异常: $out"; exit 1 }
 
       - name: 上传构建日志 (失败排障)
         if: always()
@@ -50,7 +51,8 @@ jobs:
         run: |
           git config user.email "ci@example.com"
           git config user.name "ci-log-bot"
-          git add build-log.txt || exit 0
+          git add build-log.txt 2>/dev/null || true
+          git add smoke-output.txt 2>/dev/null || true
           git commit -m "CI 构建日志 $(git rev-parse --short HEAD)" || exit 0
           git push -f origin "HEAD:refs/heads/ci-log" || exit 0
 
