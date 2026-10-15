@@ -406,32 +406,36 @@ def _download_driver(major, browser="chrome"):
 
 
 def pick_driver(browser="chrome"):
-    """驱动选择策略: 内置驱动版本匹配 → 直接用;
-    不匹配 → 缓存/自动下载匹配版; 全失败 → 退回内置驱动并警告。
-    返回 (驱动路径, 是否版本匹配)"""
+    """驱动选择策略: 候选(YKT_DRIVER 指定 + 内置)中大版本与 Chrome 匹配者直接用;
+    都不匹配 → 缓存/自动下载匹配版; 全失败 → 退回第一个候选并警告"""
     env = os.environ.get("YKT_DRIVER")
-    if env and os.path.exists(env):
-        return env, True
     bundled = bundled_driver_path(browser)
     bundled_ok = bundled and os.path.exists(bundled)
     if browser == "edge":
         return (bundled, True) if bundled_ok else (None, False)
     browser_ver = _detect_browser_version("chrome")
     want_major = browser_ver.split(".")[0] if browser_ver else None
-    bundled_ver = _detect_driver_version(bundled) if bundled_ok else None
-    if want_major and bundled_ver and want_major == bundled_ver.split(".")[0]:
-        return bundled, True
-    # 需要匹配: 先查缓存, 再下载
-    cached = _cached_driver_for(want_major) if want_major else None
+    candidates = []
+    if env and os.path.exists(env):
+        candidates.append(env)          # GUI 传入的驱动: 也只是候选, 不再绕过匹配
+    if bundled_ok:
+        candidates.append(bundled)
+    for c in candidates:
+        cver = _detect_driver_version(c)
+        if want_major and cver and cver.split(".")[0] == want_major:
+            return c, True
+    if not want_major:
+        # 浏览器版本读不出来, 无从匹配, 用第一个候选
+        return (candidates[0], True) if candidates else (None, False)
+    cached = _cached_driver_for(want_major)
     if cached:
         return cached, True
-    if want_major:
-        dl = _download_driver(want_major)
-        if dl:
-            return dl, True
-    if bundled_ok:
-        emit_log(f"警告: 内置驱动 {bundled_ver or '?'} 与 Chrome {browser_ver or '?'} 大版本不一致, 尝试直接使用")
-        return bundled, False
+    dl = _download_driver(want_major)
+    if dl:
+        return dl, True
+    if candidates:
+        emit_log(f"警告: 驱动与 Chrome {browser_ver} 大版本不一致且自动下载失败, 尝试直接使用")
+        return candidates[0], False
     return None, False
 
 
